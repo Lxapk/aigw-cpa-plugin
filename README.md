@@ -509,14 +509,20 @@ public final Y1.b f4226c = Y1.b.f3993e;   // f3993e = DEVICE_CODE
 2. 响应必须是合法 JSON，否则报「模型响应不是合法 JSON」
 3. code 必须存在且为 0，否则报「模型接口 code=<code>」
 4. data 缺失 → 空列表
-5. 取 agents 中 name=="cli" 的 models 作为白名单（为空则代表不限制）
-6. 遍历 data.models[]，逐个保留满足以下全部条件的：
+5. 遍历 data.models[]，逐个保留满足以下全部条件的：
      - id 非空
      - id 未出现过（去重）
-     - 白名单为空 或 id ∈ 白名单
      - disabled != true
    name 为空时显示名回退为 id；maxInputTokens 映射为 InputTokenLimit
+6. agents 中 name=="cli" 的 models 用于**排序**（cli 列出的排前面），
+   不再用作白名单
 ```
+
+> ⚠️ **v0.8.5 修正**：原实现把 `cli` 列表当作**硬性白名单**，导致上游新增
+> 但尚未列入 `cli` 的模型被静默丢弃 —— 例如 `deepseek-v4.1-flash`
+> （APK 里只有 `deepseek-v4-flash`）。被丢弃后该模型不在目录中，
+> 路由便不认领，最终报 `unknown provider for model`。
+> 现在 `cli` 列表只用于排序，**所有上游返回的启用模型都会被保留**。
 
 ### 模型名处理（`a2/b.java:583 k()`）
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -163,14 +164,24 @@ func parseWorkBuddyModels(body []byte) ([]workBuddyModel, error) {
 		return nil, nil
 	}
 
-	// The "cli" agent's model list is an optional whitelist.
-	whitelist := make(map[string]struct{})
+	// The "cli" agent's model list is a preference hint, not a hard filter.
+	//
+	// It was originally treated as a whitelist, which silently dropped models
+	// the provider had added but not yet listed under the "cli" agent — the
+	// user's `deepseek-v4.1-flash` disappeared exactly this way, and an
+	// unlisted model then failed routing with "unknown provider for model".
+	//
+	// The list is now used only to ORDER the catalogue (cli models first), and
+	// every enabled model the provider returns is kept.
+	cliOrder := make(map[string]int)
 	for _, agent := range doc.Data.Agents {
 		if agent.Name != workBuddyCLIAgentName {
 			continue
 		}
-		for _, id := range agent.Models {
-			whitelist[id] = struct{}{}
+		for i, id := range agent.Models {
+			if _, exists := cliOrder[id]; !exists {
+				cliOrder[id] = i
+			}
 		}
 	}
 
@@ -183,11 +194,6 @@ func parseWorkBuddyModels(body []byte) ([]workBuddyModel, error) {
 		}
 		if _, dup := seen[id]; dup {
 			continue
-		}
-		if len(whitelist) > 0 {
-			if _, ok := whitelist[id]; !ok {
-				continue
-			}
 		}
 		if m.Disabled {
 			continue
@@ -204,6 +210,23 @@ func parseWorkBuddyModels(body []byte) ([]workBuddyModel, error) {
 			MaxInputTokens: m.MaxInputTokens,
 		})
 	}
+
+	// Order the catalogue so cli-listed models come first, preserving their
+	// declared order. Models the provider added without listing them under the
+	// "cli" agent follow, in the order the provider returned them.
+	sort.SliceStable(out, func(i, j int) bool {
+		oi, iIsCLI := cliOrder[out[i].ID]
+		oj, jIsCLI := cliOrder[out[j].ID]
+		switch {
+		case iIsCLI && jIsCLI:
+			return oi < oj
+		case iIsCLI:
+			return true
+		case jIsCLI:
+			return false
+		}
+		return false
+	})
 	return out, nil
 }
 

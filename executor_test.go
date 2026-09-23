@@ -105,19 +105,55 @@ func TestParseWorkBuddyModelsSkipsEmptyAndDuplicateIDs(t *testing.T) {
 	}
 }
 
-func TestParseWorkBuddyModelsCLIWhitelist(t *testing.T) {
-	// The "cli" agent's model list acts as a whitelist (a2/b.java w()).
+// TestParseWorkBuddyModelsCLIOrdering pins the corrected behaviour: the "cli"
+// agent's list orders the catalogue, it does not filter it.
+//
+// It used to be a hard whitelist, which silently dropped models the provider
+// had added but not yet listed under "cli" — a model then failed routing with
+// "unknown provider for model".
+func TestParseWorkBuddyModelsCLIOrdering(t *testing.T) {
 	body := []byte(`{"code":0,"data":{
 		"agents":[{"name":"cli","models":["a","c"]},{"name":"other","models":["z"]}],
-		"models":[{"id":"a"},{"id":"b"},{"id":"c"}]
+		"models":[{"id":"b"},{"id":"a"},{"id":"c"}]
 	}}`)
 	models, err := parseWorkBuddyModels(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	ids := modelIDs(models)
-	if len(ids) != 2 || ids[0] != "a" || ids[1] != "c" {
-		t.Fatalf("ids = %v, want [a c]", ids)
+	// All three survive; the two cli-listed ones come first in their declared
+	// order, and the unlisted one follows.
+	want := []string{"a", "c", "b"}
+	if len(ids) != len(want) {
+		t.Fatalf("ids = %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("ids = %v, want %v", ids, want)
+		}
+	}
+}
+
+// TestParseWorkBuddyModelsKeepsUnlistedModel is the regression test for the
+// user-visible symptom: a model present in the provider catalogue but absent
+// from the "cli" agent list must still be offered.
+func TestParseWorkBuddyModelsKeepsUnlistedModel(t *testing.T) {
+	body := []byte(`{"code":0,"data":{
+		"agents":[{"name":"cli","models":["deepseek-v4-flash"]}],
+		"models":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4.1-flash"}]
+	}}`)
+	models, err := parseWorkBuddyModels(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var found bool
+	for _, m := range models {
+		if m.ID == "deepseek-v4.1-flash" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a model not listed under the cli agent was dropped: %v", modelIDs(models))
 	}
 }
 
