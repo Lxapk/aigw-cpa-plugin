@@ -739,4 +739,11 @@ func resetState() {
 	streamAccumulators.mu.Lock()
 	streamAccumulators.items = make(map[string]*streamAccumulator)
 	streamAccumulators.mu.Unlock()
+
+	// The model catalogue is a package-level cache, so it must be cleared too:
+	// leaving it populated leaks state between tests (a later test would see a
+	// previously cached catalogue and skip its own fetch).
+	workBuddyModelCache.mu.Lock()
+	workBuddyModelCache.entries = make(map[string]modelCacheEntry)
+	workBuddyModelCache.mu.Unlock()
 }

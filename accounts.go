@@ -78,6 +78,10 @@ type workBuddyAccount struct {
 	Reason        string    `json:"reason,omitempty"`
 	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
 	Usable        bool      `json:"usable"`
+
+	// credentials is the parsed credential material, kept for internal callers
+	// (model catalogue, quota refresh). Unexported so it never reaches JSON.
+	credentials *workBuddyCredentials
 }
 
 // accountStore caches the inventory briefly so a page render does not hit the
@@ -172,6 +176,7 @@ func loadWorkBuddyAccounts() ([]workBuddyAccount, error) {
 		}
 
 		account := workBuddyAccount{
+			credentials:  creds,
 			AuthIndex:    entry.AuthIndex,
 			Label:        firstNonEmpty(entry.Label, entry.Name, creds.Nickname, creds.UID, entry.AuthIndex),
 			UID:          creds.UID,

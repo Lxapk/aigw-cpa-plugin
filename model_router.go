@@ -10,17 +10,27 @@ import (
 // This file implements CPA's ModelRouter capability.
 //
 // Without a router, CPA has no reason to hand a chat request to a plugin
-// executor: built-in providers claim their own models, and an unknown model
-// name would fall through to "no provider". The router closes that gap by
-// claiming requests whose model belongs to the WorkBuddy catalogue and routing
-// them to this plugin's own executor (ModelRouteTargetSelf).
+// executor: it looks the model up in its own provider table via
+// util.GetProviderName(), and an unknown name produces
 //
-// The decision is deliberately conservative:
+//	unknown provider for model deepseek-v4.1-flash
 //
-//	* only chat-completions source format is claimed
-//	* the requested model must look like a WorkBuddy model
+// The router closes that gap by claiming requests whose model belongs to
+// WorkBuddy.
 //
-// so other providers keep working untouched.
+// Claim criteria, in order of reliability:
+//
+//  1. an explicit "codebuddy/<model>" (or "workbuddy/<model>") prefix — the
+//     client is telling us directly
+//  2. the plugin has a WorkBuddy credential (AvailableProviders / auth store),
+//     which is what makes the model servable at all
+//  3. the model appears in the discovered catalogue
+//
+// Criterion 2 matters because the catalogue is fetched lazily: relying on it
+// alone means a request that arrives before any /v1/models call is not claimed
+// and fails with "unknown provider". Any model name is accepted for a provider
+// the plugin actually owns; the upstream rejects genuinely bogus names with a
+// clear error, which is a better outcome than refusing to route at all.
 
 // modelRoute answers model.route.
 func modelRoute(request []byte) ([]byte, error) {
@@ -39,39 +49,71 @@ func modelRoute(request []byte) ([]byte, error) {
 
 	requested := req.RequestedModel
 	if requested == "" {
-		meta, okMeta := parseRequestMeta(req.Body)
-		if okMeta {
+		if meta, okMeta := parseRequestMeta(req.Body); okMeta {
 			requested = meta.Model
 		}
 	}
-	requested = normalizeRouteModel(requested)
+	requested = strings.TrimSpace(requested)
 
-	// An explicitly prefixed "codebuddy/<model>" always belongs to us, mirroring
-	// the provider-prefix convention the source gateway used (V1/o.k step 6).
+	// 1) explicit provider prefix --------------------------------------
 	if provider, model, ok := splitProviderPrefix(requested); ok {
 		if isWorkBuddyProvider(provider) {
-			return okEnvelope(pluginapi.ModelRouteResponse{
-				Handled:     true,
-				TargetKind:  pluginapi.ModelRouteTargetSelf,
-				Reason:      "explicit codebuddy prefix",
-				TargetModel: model,
-			})
+			return routeSelf(model, "explicit codebuddy prefix")
 		}
 		// Another provider was requested explicitly: do not interfere.
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
 	}
 
-	// Otherwise claim the request only if the model is in the known catalogue.
-	if !isKnownWorkBuddyModel(requested) {
+	resolved := normalizeRouteModel(requested)
+
+	// 2) does this plugin own any usable credential? --------------------
+	if !pluginHasWorkBuddyCredential(req) {
+		// No WorkBuddy account is registered: the request cannot be served
+		// here, so leave it to the host (it may belong to another provider).
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
 	}
 
+	// 3) is the model one we have seen? ---------------------------------
+	// A hit is definitive; a miss is not, because the catalogue is fetched
+	// lazily. Fall through to claiming, since the provider is ours.
+	if isKnownWorkBuddyModel(resolved) {
+		return routeSelf(resolved, "model present in WorkBuddy catalogue")
+	}
+
+	return routeSelf(resolved, "provider has a WorkBuddy credential")
+}
+
+// routeSelf builds a "handled by this plugin" decision.
+func routeSelf(model, reason string) ([]byte, error) {
 	return okEnvelope(pluginapi.ModelRouteResponse{
 		Handled:     true,
 		TargetKind:  pluginapi.ModelRouteTargetSelf,
-		Reason:      "model present in WorkBuddy catalogue",
-		TargetModel: requested,
+		Reason:      reason,
+		TargetModel: model,
 	})
+}
+
+// pluginHasWorkBuddyCredential reports whether any WorkBuddy credential is
+// registered.
+//
+// AvailableProviders (built-in provider keys with auth registered) is checked
+// first because it is authoritative and cheap; the plugin's own account store
+// is the fallback for hosts that do not populate it.
+func pluginHasWorkBuddyCredential(req pluginapi.ModelRouteRequest) bool {
+	for _, p := range req.AvailableProviders {
+		if isWorkBuddyProvider(p) {
+			return true
+		}
+	}
+	// The account store reads the auth inventory directly and is cached for a
+	// few seconds, so this stays cheap on the hot path.
+	for _, a := range state.accounts.accounts() {
+		if a.Disabled {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // normalizeRouteModel trims the requested model, treating "auto" as "let the
@@ -95,8 +137,8 @@ func splitProviderPrefix(model string) (provider, rest string, ok bool) {
 }
 
 // isKnownWorkBuddyModel reports whether the model has been discovered for any
-// configured credential. The cached catalogue is populated by model.for_auth,
-// which CPA calls when it prepares a provider's model list.
+// configured credential. The cache is populated by model.for_auth, which CPA
+// calls when it prepares a provider's model list.
 func isKnownWorkBuddyModel(model string) bool {
 	if model == "" {
 		return false

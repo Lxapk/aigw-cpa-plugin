@@ -319,6 +319,11 @@ func TestModelStaticServesCachedCatalogue(t *testing.T) {
 func TestModelRouteClaimsKnownModel(t *testing.T) {
 	resetState()
 	workBuddyModelCache.put("cn/u-1", []workBuddyModel{{ID: "claude-sonnet-4"}})
+	// A credential must exist: the router only claims models it can serve.
+	installAuthList(t, []map[string]any{
+		{"auth_index": "codebuddy-u-1.json", "provider": workBuddyProviderKey,
+			"storage_json": mustStorage(t, map[string]any{"accessToken": "at", "uid": "u-1"})},
+	})
 
 	res := callOK(t, pluginabi.MethodModelRoute, pluginapi.ModelRouteRequest{
 		SourceFormat:   "chat-completions",
@@ -334,18 +339,66 @@ func TestModelRouteClaimsKnownModel(t *testing.T) {
 	}
 }
 
-func TestModelRouteIgnoresUnknownModel(t *testing.T) {
+// TestModelRouteClaimsUncataloguedModelWhenProviderOwned is the fix for
+// "unknown provider for model deepseek-v4.1-flash": the catalogue is fetched
+// lazily, so claiming only catalogued names refused to route any request that
+// arrived before the first /v1/models call.
+func TestModelRouteClaimsUncataloguedModelWhenProviderOwned(t *testing.T) {
 	resetState()
-	workBuddyModelCache.put("cn/u-1", []workBuddyModel{{ID: "known"}})
+	// Catalogue deliberately empty.
+	installAuthList(t, []map[string]any{
+		{"auth_index": "codebuddy-u-1.json", "provider": workBuddyProviderKey,
+			"storage_json": mustStorage(t, map[string]any{"accessToken": "at", "uid": "u-1"})},
+	})
 
 	res := callOK(t, pluginabi.MethodModelRoute, pluginapi.ModelRouteRequest{
 		SourceFormat:   "chat-completions",
-		RequestedModel: "some-other-model",
+		RequestedModel: "deepseek-v4.1-flash",
+	})
+	var out pluginapi.ModelRouteResponse
+	mustDecode(t, res, &out)
+	if !out.Handled {
+		t.Fatal("a model for a provider we own must be claimed even before the catalogue loads")
+	}
+	if out.TargetKind != pluginapi.ModelRouteTargetSelf {
+		t.Fatalf("targetKind = %q", out.TargetKind)
+	}
+	if out.TargetModel != "deepseek-v4.1-flash" {
+		t.Fatalf("targetModel = %q", out.TargetModel)
+	}
+}
+
+// TestModelRouteDefersWithoutCredential keeps the plugin out of the way when it
+// has no WorkBuddy account at all.
+func TestModelRouteDefersWithoutCredential(t *testing.T) {
+	resetState()
+	installAuthList(t, nil)
+
+	res := callOK(t, pluginabi.MethodModelRoute, pluginapi.ModelRouteRequest{
+		SourceFormat:   "chat-completions",
+		RequestedModel: "deepseek-v4.1-flash",
 	})
 	var out pluginapi.ModelRouteResponse
 	mustDecode(t, res, &out)
 	if out.Handled {
-		t.Fatal("unknown model must not be claimed")
+		t.Fatal("with no WorkBuddy credential the host should decide")
+	}
+}
+
+// TestModelRouteUsesAvailableProviders checks the authoritative signal CPA
+// supplies, without consulting the account store.
+func TestModelRouteUsesAvailableProviders(t *testing.T) {
+	resetState()
+	// Account store empty; only AvailableProviders says we have an account.
+	res := callOK(t, pluginabi.MethodModelRoute, pluginapi.ModelRouteRequest{
+		SourceFormat:       "chat-completions",
+		RequestedModel:     "some-model",
+		AvailableProviders: []string{"anthropic", workBuddyProviderKey},
+	})
+	var out pluginapi.ModelRouteResponse
+	mustDecode(t, res, &out)
+	if !out.Handled {
+		t.Fatal("AvailableProviders listing codebuddy should be enough to claim")
 	}
 }
 
@@ -729,4 +782,63 @@ func asUpstreamError(err error, target **workBuddyUpstreamError) bool {
 	}
 	*target = upErr
 	return true
+}
+
+// ---- model.static lazy catalogue ---------------------------------------
+
+// TestModelStaticFetchesCatalogueWhenCacheEmpty covers the lazy-catalogue fix:
+// without it the model list stayed empty until something else triggered a
+// fetch, so CPA reported "unknown provider for model <name>" because the router
+// refused to claim anything not already cached.
+func TestModelStaticFetchesCatalogueWhenCacheEmpty(t *testing.T) {
+	resetState()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "personal/models") {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"models":[
+				{"id":"deepseek-v4.1-flash","name":"DeepSeek V4.1 Flash"}
+			]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	orig := copilotHostValue()
+	setCopilotHost(server.URL)
+	defer setCopilotHost(orig)
+
+	installAuthList(t, []map[string]any{
+		{"auth_index": "codebuddy-u-1.json", "provider": workBuddyProviderKey,
+			"storage_json": mustStorage(t, map[string]any{
+				"accessToken": "at", "uid": "u-1", "domain": "cn"})},
+	})
+
+	if n := len(workBuddyModelCache.snapshot()); n != 0 {
+		t.Fatalf("precondition: cache should be empty, got %d", n)
+	}
+
+	res := callOK(t, pluginabi.MethodModelStatic, pluginapi.StaticModelRequest{})
+	var out pluginapi.ModelResponse
+	mustDecode(t, res, &out)
+	if len(out.Models) == 0 {
+		t.Fatal("model.static should fetch the catalogue rather than return empty")
+	}
+	if out.Models[0].ID != "deepseek-v4.1-flash" {
+		t.Fatalf("models = %+v", out.Models)
+	}
+}
+
+// TestModelStaticEmptyWithoutCredential keeps the no-account case quiet.
+func TestModelStaticEmptyWithoutCredential(t *testing.T) {
+	resetState()
+	installAuthList(t, nil)
+
+	res := callOK(t, pluginabi.MethodModelStatic, pluginapi.StaticModelRequest{})
+	var out pluginapi.ModelResponse
+	mustDecode(t, res, &out)
+	if len(out.Models) != 0 {
+		t.Fatalf("models = %+v, want none", out.Models)
+	}
 }

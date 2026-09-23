@@ -81,9 +81,10 @@ func (c *modelCache) snapshot() []workBuddyModel {
 
 // modelStatic answers model.static.
 //
-// WorkBuddy cannot enumerate models unauthenticated, so this reports whatever
-// has already been discovered for a credential. That is enough for the host to
-// expose a model list before the first request; ModelsForAuth fills it in.
+// WorkBuddy cannot enumerate models unauthenticated, so the catalogue is built
+// from the first usable credential. Reading only the cache would leave the list
+// empty until something else triggered a fetch, which is why this falls back to
+// a live query.
 func modelStatic(request []byte) ([]byte, error) {
 	var req pluginapi.StaticModelRequest
 	if len(request) > 0 {
@@ -93,10 +94,40 @@ func modelStatic(request []byte) ([]byte, error) {
 	}
 	_ = req
 
+	models := workBuddyModelCache.snapshot()
+	if len(models) == 0 {
+		models = fetchCatalogueFromAnyCredential()
+	}
+
 	return okEnvelope(pluginapi.ModelResponse{
 		Provider: workBuddyProviderKey,
-		Models:   modelsToInfo(workBuddyModelCache.snapshot()),
+		Models:   modelsToInfo(models),
 	})
+}
+
+// fetchCatalogueFromAnyCredential queries the model catalogue using the first
+// WorkBuddy credential it can find, and caches the result.
+//
+// It returns nil when there is no credential or the upstream call fails; the
+// caller then reports an empty list rather than an error, so the host keeps
+// serving other providers.
+func fetchCatalogueFromAnyCredential() []workBuddyModel {
+	for _, account := range listWorkBuddyAccounts() {
+		if account.Disabled || account.Expired {
+			continue
+		}
+		creds := account.credentials
+		if creds == nil || creds.AccessToken == "" {
+			continue
+		}
+		models, errList := workBuddyUpstream.listModels(context.Background(), creds)
+		if errList != nil || len(models) == 0 {
+			continue
+		}
+		workBuddyModelCache.put(creds.AuthKey(), models)
+		return models
+	}
+	return nil
 }
 
 // modelForAuth answers model.for_auth: fetch the catalogue for one credential.
