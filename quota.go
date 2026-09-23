@@ -197,7 +197,7 @@ func startQuotaScheduler() {
 	state.quota.started = true
 	state.quota.mu.Unlock()
 
-	go quotaLoop()
+	safeGo("quota-loop", quotaLoop)
 }
 
 // quotaLoop refreshes quota on the configured interval.
@@ -216,24 +216,31 @@ func quotaLoop() {
 		case <-state.quota.stopCh:
 			return
 		case <-ticker.C:
-			cfg := state.settings.get().Quota
-			if !cfg.Enabled {
-				continue
-			}
-			state.quota.mu.Lock()
-			last := state.quota.lastAutoAt
-			busy := state.quota.running
-			state.quota.mu.Unlock()
-			if busy {
-				continue
-			}
-			interval := time.Duration(clampIntervalMinutes(cfg.IntervalMinutes)) * time.Minute
-			if !last.IsZero() && time.Since(last) < interval {
-				continue
-			}
-			_, _ = runQuotaRefresh("auto")
+			guardLoop("quota-loop", func() {
+				quotaTick()
+			})
 		}
 	}
+}
+
+// quotaTick performs one scheduled refresh decision.
+func quotaTick() {
+	cfg := state.settings.get().Quota
+	if !cfg.Enabled {
+		return
+	}
+	state.quota.mu.Lock()
+	last := state.quota.lastAutoAt
+	busy := state.quota.running
+	state.quota.mu.Unlock()
+	if busy {
+		return
+	}
+	interval := time.Duration(clampIntervalMinutes(cfg.IntervalMinutes)) * time.Minute
+	if !last.IsZero() && time.Since(last) < interval {
+		return
+	}
+	_, _ = runQuotaRefresh("auto")
 }
 
 func stopQuotaScheduler() {

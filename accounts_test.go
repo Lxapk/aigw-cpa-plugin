@@ -473,3 +473,113 @@ func newTencentStub(t *testing.T) *httptest.Server {
 		}
 	}))
 }
+
+// ---- resource route constraints ----------------------------------------
+
+// TestResourceRoutesAreValidForCPA guards the constraint that cost the panel
+// entry its visibility: CPA normalizes a resource path with
+// strings.TrimRight(path, "/") and rejects an empty result
+// (internal/pluginhost/management.go:209), so declaring Path "/" logs
+// "declared invalid resource route /" and the menu entry never appears.
+func TestResourceRoutesAreValidForCPA(t *testing.T) {
+	reg := managementRegistration()
+	if len(reg.Resources) == 0 {
+		t.Fatal("no resource routes declared")
+	}
+	for _, r := range reg.Resources {
+		p := strings.TrimSpace(r.Path)
+		if p == "" {
+			t.Errorf("resource %q has an empty path", r.Menu)
+			continue
+		}
+		if strings.TrimRight(p, "/") == "" {
+			t.Errorf("resource %q declares %q, which CPA trims to an empty path and rejects", r.Menu, p)
+		}
+		if strings.ContainsAny(p, " \t\r\n:*") || strings.Contains(p, "..") {
+			t.Errorf("resource %q declares an unusable path %q", r.Menu, p)
+		}
+		if r.Menu == "" {
+			t.Errorf("resource %q has no menu label, so it would not show in the UI", p)
+		}
+	}
+}
+
+// TestCombinedPageReachableAtHomePath makes sure the declared resource path and
+// the handler agree.
+func TestCombinedPageReachableAtHomePath(t *testing.T) {
+	resetState()
+	installAuthList(t, nil)
+
+	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
+		Method:  http.MethodGet,
+		Path:    resourceBasePath() + "/" + pluginName + "/home",
+		Headers: http.Header{"Accept": []string{"text/html"}},
+	})
+	var mr managementResponse
+	mustDecode(t, res, &mr)
+	if mr.StatusCode != http.StatusOK || len(mr.Body) == 0 {
+		t.Fatalf("home resource: status=%d len=%d", mr.StatusCode, len(mr.Body))
+	}
+	if !strings.Contains(string(mr.Body), "WorkBuddy 账号") {
+		t.Fatal("home resource did not render the combined page")
+	}
+}
+
+// ---- management route coverage -----------------------------------------
+
+// TestEveryPanelEndpointIsRegistered guards a real defect: the strategy
+// selector in the panel calls /routing/config and /routing/reset, but those
+// routes were never declared, so the buttons silently did nothing (404).
+//
+// The check derives the required set from the page scripts rather than a
+// hand-written list, so a new fetch() call cannot be added without a route.
+func TestEveryPanelEndpointIsRegistered(t *testing.T) {
+	resetState()
+
+	reg := managementRegistration()
+	registered := map[string]bool{}
+	for _, r := range reg.Routes {
+		registered[strings.ToUpper(r.Method)+" "+r.Path] = true
+	}
+
+	prefix := "/" + pluginName
+	// Paths referenced by the browser scripts, relative to the management mount.
+	required := []struct{ method, path string }{
+		{"GET", prefix + "/routing/status"},
+		{"POST", prefix + "/routing/config"},
+		{"POST", prefix + "/routing/reset"},
+		{"GET", prefix + "/accounts"},
+		{"POST", prefix + "/run"},
+		{"GET", prefix + "/checkin/status"},
+		{"POST", prefix + "/checkin/config"},
+		{"POST", prefix + "/checkin/run"},
+		{"GET", prefix + "/quota/status"},
+		{"POST", prefix + "/quota/config"},
+		{"POST", prefix + "/quota/refresh"},
+	}
+	for _, r := range required {
+		key := r.method + " " + r.path
+		if !registered[key] {
+			t.Errorf("panel calls %s but no such management route is registered", key)
+		}
+	}
+}
+
+// TestManagementRoutesCarryPluginPrefix pins the prefix contract: CPA builds a
+// management route key from the full request path without prepending the plugin
+// id, so the plugin must declare "/<plugin-id>/..." itself. (Resource routes are
+// the opposite — CPA prepends the id there.)
+func TestManagementRoutesCarryPluginPrefix(t *testing.T) {
+	reg := managementRegistration()
+	for _, r := range reg.Routes {
+		if !strings.HasPrefix(r.Path, "/"+pluginName+"/") {
+			t.Errorf("management route %q %q must start with /%s/ — CPA does not add it",
+				r.Method, r.Path, pluginName)
+		}
+	}
+	for _, r := range reg.Resources {
+		if strings.HasPrefix(r.Path, "/"+pluginName) {
+			t.Errorf("resource route %q must be relative — CPA prepends the plugin id", r.Path)
+		}
+	}
+}

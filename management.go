@@ -23,7 +23,13 @@ func managementRegistration() managementRegistrationResponse {
 		Resources: []pluginapi.ResourceRoute{
 			{
 				// The single combined view is the primary entry point.
-				Path:        "/",
+				//
+				// The path must not be "/": CPA normalizes a resource path with
+				// strings.TrimRight(path, "/") and rejects the result when it
+				// becomes empty (internal/pluginhost/management.go:209), so a
+				// root resource is logged as "declared invalid resource route /"
+				// and silently dropped — the menu entry then never appears.
+				Path:        "home",
 				Menu:        "AIGW 反向代理",
 				Description: "WorkBuddy 账号、签到、额度与调用统计，全部集中在这一页。",
 			},
@@ -43,6 +49,24 @@ func managementRegistration() managementRegistrationResponse {
 				Method:      http.MethodGet,
 				Path:        "/aigw-reverse-proxy/accounts",
 				Description: "WorkBuddy account list as JSON (read from the auth store).",
+			},
+			// Account-switching strategy endpoints. The panel's strategy
+			// selector calls these, so a missing registration makes the
+			// buttons silently do nothing.
+			{
+				Method:      http.MethodGet,
+				Path:        "/aigw-reverse-proxy/routing/status",
+				Description: "Current account-switching strategy and selection order.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/routing/config",
+				Description: "Update the account-switching strategy.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/routing/reset",
+				Description: "Reset the round-robin rotation cursor.",
 			},
 			{
 				Method:      http.MethodPost,

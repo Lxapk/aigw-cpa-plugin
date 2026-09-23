@@ -119,6 +119,40 @@ func executorExecute(request []byte) ([]byte, error) {
 		return errorEnvelope("upstream_error", errChat.Error(), 502), nil
 	}
 
+	// The provider rejects non-streaming chat requests outright
+	// ({"code":11101,"msg":"Non-stream chat request is currently not supported"}).
+	// Satisfy the client by streaming upstream and folding the frames back into
+	// a single chat.completion.
+	if isNonStreamUnsupported(status, respBody) {
+		streamBody, errForce := forceStream(upstreamBody)
+		if errForce != nil {
+			return errorEnvelope("invalid_request", errForce.Error(), 400), nil
+		}
+		var frames [][]byte
+		_, streamHeaders, errStream := workBuddyUpstream.chatCompletionsStream(ctx, creds, streamBody, func(frame []byte) error {
+			if payload, keep := sseFrameToBareJSON(frame); keep {
+				frames = append(frames, payload)
+			}
+			return nil
+		})
+		if errStream != nil {
+			return errorEnvelope("upstream_error", errStream.Error(), 502), nil
+		}
+		if len(frames) == 0 {
+			return errorEnvelope("upstream_error", "上游未返回任何内容", 502), nil
+		}
+		aggregated := aggregateStreamToCompletion(frames, req.Model)
+		return okEnvelope(pluginapi.ExecutorResponse{
+			Payload: aggregated,
+			Headers: filterResponseHeaders(streamHeaders),
+			Metadata: map[string]any{
+				"upstream_status": status,
+				"provider":        workBuddyProviderKey,
+				"aggregated":      true,
+			},
+		})
+	}
+
 	return okEnvelope(pluginapi.ExecutorResponse{
 		Payload: respBody,
 		Headers: filterResponseHeaders(headers),

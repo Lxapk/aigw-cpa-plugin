@@ -124,8 +124,17 @@ func (c *workBuddyClient) checkin(ctx context.Context, creds *workBuddyCredentia
 	return interpretCheckinResponse(resp.StatusCode, body), nil
 }
 
-// interpretCheckinResponse applies the source app's success/failure rules.
-// It is separated from the HTTP call so the decision table is unit-testable.
+// interpretCheckinResponse applies the source app's success/failure rules,
+// extended with the codes observed against the live provider.
+//
+// Live evidence (2026-09-23): a repeat check-in returns HTTP **400** with
+//
+//	{"code":10001,"msg":"今天已签到，请明天再来"}
+//
+// The APK's own rule set treated any non-2xx as a hard failure, which
+// mislabelled an idempotent repeat as an error. The provider reports the
+// semantic outcome in "code", not in the HTTP status, so the envelope is parsed
+// first and the status only decides when no idempotency marker is present.
 func interpretCheckinResponse(statusCode int, body []byte) *checkinOutcome {
 	out := &checkinOutcome{
 		HTTPStatus: statusCode,
@@ -133,14 +142,7 @@ func interpretCheckinResponse(statusCode int, body []byte) *checkinOutcome {
 		Code:       -1,
 	}
 
-	// Non-2xx: "签到失败（HTTP <status>）：<body>"
-	if statusCode < 200 || statusCode >= 300 {
-		out.Success = false
-		out.Message = fmt.Sprintf("签到失败（HTTP %d）：%s", statusCode, truncateString(string(body), 300))
-		return out
-	}
-
-	// Parse "code" the same way the source does: absent/unparsable -> -1.
+	// Parse the envelope regardless of status.
 	if len(body) > 0 {
 		var doc struct {
 			Code    *json.Number `json:"code"`
@@ -153,24 +155,23 @@ func interpretCheckinResponse(statusCode int, body []byte) *checkinOutcome {
 					out.Code = int(n)
 				}
 			}
-			if out.Message == "" {
-				if strings.TrimSpace(doc.Message) != "" {
-					out.Message = strings.TrimSpace(doc.Message)
-				} else if strings.TrimSpace(doc.Msg) != "" {
-					out.Message = strings.TrimSpace(doc.Msg)
-				}
+			if strings.TrimSpace(doc.Message) != "" {
+				out.Message = strings.TrimSpace(doc.Message)
+			} else if strings.TrimSpace(doc.Msg) != "" {
+				out.Message = strings.TrimSpace(doc.Msg)
 			}
 		}
 	}
 
-	// code == 0 -> fresh success.
-	if out.Code == 0 {
+	// code 0 on a 2xx is a fresh success.
+	if out.Code == 0 && statusCode >= 200 && statusCode < 300 {
 		out.Success = true
 		out.Message = "签到成功"
 		return out
 	}
 
-	// Otherwise look for the idempotency markers.
+	// Idempotency markers win over the HTTP status: the live provider answers
+	// HTTP 400 for "already checked in today".
 	text := string(body)
 	if containsSubstringFold(text, "已签到") || containsSubstringFold(text, "already") {
 		out.Success = true
@@ -179,6 +180,16 @@ func interpretCheckinResponse(statusCode int, body []byte) *checkinOutcome {
 		return out
 	}
 
+	// Genuine non-2xx without an idempotency marker.
+	if statusCode < 200 || statusCode >= 300 {
+		out.Success = false
+		if out.Message == "" {
+			out.Message = fmt.Sprintf("签到失败（HTTP %d）", statusCode)
+		}
+		return out
+	}
+
+	// 2xx with a non-zero code and no marker: a real failure.
 	out.Success = false
 	if out.Message == "" {
 		out.Message = fmt.Sprintf("签到失败（code=%d）", out.Code)

@@ -396,17 +396,48 @@ func pickByExpiryScheduler(req pluginapi.SchedulerPickRequest, candidates []sche
 
 // lookupQuotaByUID finds a recorded credit summary by uid or auth id.
 func lookupQuotaByUID(id string) (*workBuddyQuota, bool) {
+	return lookupQuotaAny(id)
+}
+
+// lookupQuotaAny finds a recorded credit summary under any of the identifiers a
+// credential may be keyed by.
+//
+// Three keys are in play and they differ by code path:
+//
+//	host.auth.list -> entry.AuthIndex   (the runtime index, e.g. e420b8fe...)
+//	executor       -> auth.AuthIndex    (the credential's uid)
+//	models         -> creds.AuthKey()   ("<domain>/<uid>")
+//
+// Accepting all of them keeps a successful query from being invisible to the
+// panel, which is exactly what happened before this helper existed: the quota
+// refresh stored the reading under the auth index while the account table looked
+// it up by uid, so the panel showed credits 0 despite a successful query.
+func lookupQuotaAny(ids ...string) (*workBuddyQuota, bool) {
 	state.quota.mu.Lock()
 	defer state.quota.mu.Unlock()
-	if q, ok := state.quota.byAuth[id]; ok && q != nil {
-		return q, true
-	}
-	for authID, q := range state.quota.byAuth {
-		if q == nil {
+
+	for _, id := range ids {
+		id = trimSpace(id)
+		if id == "" {
 			continue
 		}
-		if authID == id {
+		if q, ok := state.quota.byAuth[id]; ok && q != nil {
 			return q, true
+		}
+	}
+	// Fall back to matching the "<domain>/<uid>" keys.
+	for _, id := range ids {
+		id = trimSpace(id)
+		if id == "" {
+			continue
+		}
+		for key, q := range state.quota.byAuth {
+			if q == nil {
+				continue
+			}
+			if strings.HasSuffix(key, "/"+id) {
+				return q, true
+			}
 		}
 	}
 	return nil, false

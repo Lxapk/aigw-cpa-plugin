@@ -192,6 +192,14 @@ func loadWorkBuddyAccounts() ([]workBuddyAccount, error) {
 		out = append(out, account)
 	}
 
+	// Collapse duplicates.
+	//
+	// host.auth.list can surface the same credential twice — once from the auth
+	// file on disk and once from the runtime index — which showed up as a doubled
+	// account row in the panel. A credential is the same when its uid matches, or,
+	// when the uid is unavailable, its auth_index does.
+	out = dedupeAccounts(out)
+
 	// Stable, useful ordering: most credits first (mirrors A0/s.java:596),
 	// then by label for ties.
 	sort.SliceStable(out, func(i, j int) bool {
@@ -201,6 +209,67 @@ func loadWorkBuddyAccounts() ([]workBuddyAccount, error) {
 		return out[i].Label < out[j].Label
 	})
 	return out, nil
+}
+
+// dedupeAccounts removes repeated credentials, keeping the most informative
+// entry of each group (the one with a parsed credential body and a label).
+func dedupeAccounts(in []workBuddyAccount) []workBuddyAccount {
+	if len(in) < 2 {
+		return in
+	}
+	index := make(map[string]int, len(in))
+	out := make([]workBuddyAccount, 0, len(in))
+
+	for _, a := range in {
+		key := accountIdentity(a)
+		if key == "" {
+			out = append(out, a)
+			continue
+		}
+		pos, seen := index[key]
+		if !seen {
+			index[key] = len(out)
+			out = append(out, a)
+			continue
+		}
+		// Prefer the richer record: one with credentials, then one with a
+		// human label.
+		if accountScore(a) > accountScore(out[pos]) {
+			out[pos] = a
+		}
+	}
+	return out
+}
+
+// accountIdentity derives the dedupe key: the provider uid when present, else
+// the auth index.
+func accountIdentity(a workBuddyAccount) string {
+	if strings.TrimSpace(a.UID) != "" {
+		return "uid:" + strings.TrimSpace(a.UID)
+	}
+	if strings.TrimSpace(a.AuthIndex) != "" {
+		return "idx:" + strings.TrimSpace(a.AuthIndex)
+	}
+	return ""
+}
+
+// accountScore ranks how much useful information a record carries.
+func accountScore(a workBuddyAccount) int {
+	score := 0
+	if a.credentials != nil && a.credentials.AccessToken != "" {
+		score += 100
+	}
+	if a.CreditsKnown {
+		score += 10
+	}
+	if a.Nickname != "" {
+		score += 2
+	}
+	// A label equal to the auth index is the least useful fallback.
+	if a.Label != "" && a.Label != a.AuthIndex {
+		score += 5
+	}
+	return score
 }
 
 // isWorkBuddyAuthEntry applies the strict provider filter.
@@ -253,28 +322,23 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 		// Variant label for the UI.
 		a.Variant = string(variantForDomain(a.Domain))
 
-		// Quota: prefer the newest reading we hold.
-		state.quota.mu.Lock()
-		if q, ok := state.quota.byAuth[a.AuthIndex]; ok && q != nil && q.Known {
+		// Quota: look the reading up by every identifier the credential has.
+		//
+		// The quota writer keys by the auth index it received from
+		// host.auth.list, while the executor path keys by the credential's uid
+		// (auth.AuthIndex). Looking up only one of them silently loses the
+		// figure — the panel then showed credits 0 despite a successful query.
+		authKey := ""
+		if a.credentials != nil {
+			authKey = a.credentials.AuthKey()
+		}
+		if q, ok := lookupQuotaAny(a.AuthIndex, a.UID, authKey); ok {
 			a.Credits = q.Credits
-			a.CreditsKnown = true
+			a.CreditsKnown = q.Known
 			a.CreditsExpireAt = q.soonestExpireAt()
 			a.CreditsExpiringSoon = q.expiringSoon()
 			a.CreditsExpired = q.expired()
 			a.CreditPackages = q.Labels
-		}
-		state.quota.mu.Unlock()
-
-		// A uid-keyed reading is the fallback when the file name differs.
-		if !a.CreditsKnown {
-			if q, ok := lookupQuotaByUID(a.UID); ok {
-				a.Credits = q.Credits
-				a.CreditsKnown = q.Known
-				a.CreditsExpireAt = q.soonestExpireAt()
-				a.CreditsExpiringSoon = q.expiringSoon()
-				a.CreditsExpired = q.expired()
-				a.CreditPackages = q.Labels
-			}
 		}
 		if a.CreditsExpireAt > 0 {
 			days := (a.CreditsExpireAt - time.Now().Unix()) / 86400

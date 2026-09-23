@@ -988,6 +988,60 @@ plugins:
 
 ---
 
+## 2.12 本地端到端实测与修复（v0.8.6）
+
+在沙箱内**真实搭建了 CPA + 插件**并完成一次完整登录与调用，验证并修掉了 6 个只有在真机
+运行时才会暴露的缺陷。
+
+### 实测环境
+
+| 项 | 值 |
+|---|---|
+| CPA | 本地编译 v7.3.15（`CGO_ENABLED=1 go build ./cmd/server`） |
+| 插件 | 放入 `plugins/linux/arm64/aigw-reverse-proxy.so` |
+| 登录 | 设备码：`GET /v0/management/codebuddy-auth-url` → 浏览器授权 → `GET /v0/management/get-auth-status?state=...` |
+| 账号落盘 | `/root/.cli-proxy-api/codebuddy-<uuid>.json` |
+
+### 实测结果（全部通过）
+
+```
+✓ 设备码登录        浏览器授权后 status=ok
+✓ 账号注册          provider=codebuddy，quota_provider=codebuddy
+✓ 模型列表          30 个模型，含 deepseek-v4.1-flash
+✓ 流式对话          delta.content 返回真实内容
+✓ 非流式对话        aggregate 成功，返回 chat.completion
+✓ 额度查询          周期剩余 1890（真实数据）
+✓ 签到              今日已签到（幂等识别正确）
+✓ 策略切换          by_expiry / round_robin / random / by_credits
+```
+
+### 本轮修掉的 6 个缺陷
+
+| # | 缺陷 | 症状 |
+|---|---|---|
+| 1 | **资源路由 `Path: "/"` 被 CPA 拒绝** | 面板菜单项不显示（CPA 用 `TrimRight(path,"/")`，空串即拒） |
+| 2 | **管理路由前缀理解错误** | ManagementRoute 需自带 `/<plugin-id>/` 前缀（CPA 不拼）；ResourceRoute 则相反（CPA 会拼） |
+| 3 | **缺失 `routing/*` 三个路由** | 策略切换按钮点了没反应（前端调用但未注册） |
+| 4 | **上游不支持非流式对话** | `{"code":11101,"msg":"Non-stream chat request is currently not supported"}` → 现改为内部转流式再聚合 |
+| 5 | **「今日已签到」被误判为失败** | 上游用 **HTTP 400 + code=10001 + 中文文案**，原判定在非 2xx 分支直接返回失败 |
+| 6 | **额度查到了但面板显示 0** | 写入按 auth index、读取按 uid，三个 key 不一致；改为多 key 匹配 |
+
+另外加固了一处**会导致插件被熔断**的风险：CPA 会把 panic 过的插件加入 `fused` 集合，
+此后**所有能力（含 model_router）都被跳过**，表现为「之前能用、突然 unknown provider」。
+新增 `safe.go`，把 panic 兜在局部并打日志，不再让一次异常瘫痪整个插件。
+
+### 关于非流式
+
+WorkBuddy 上游**只接受流式请求**。插件收到非流式请求时会：
+
+1. 先把请求改成 `stream: true`（并补 `stream_options.include_usage`）
+2. 流式调用上游
+3. 把 SSE 帧**聚合成一个 `chat.completion`** 返回给客户端
+
+包含 `delta.content` 拼接、`finish_reason` 取末帧、`usage` 透传，以及中途错误帧的识别。
+
+---
+
 ## 3. 获取与构建
 
 ### 方式 A：直接下载预编译插件（最快）
