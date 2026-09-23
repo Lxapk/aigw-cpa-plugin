@@ -126,11 +126,16 @@ jobs:
             --amd64 "dist/aigw-reverse-proxy-linux-amd64/aigw-reverse-proxy.so" \
             --out release
 
-          python3 scripts/gen_registry.py \
+          # 用 direct 安装类型：它不调用任何 GitHub API，只按 URL+SHA256 下载，
+          # 因此不受 /releases/tags/<tag> 索引异常的影响（该端点曾对本仓库恒返回
+          # 0 个资产，导致 github-release 类型完全装不上）。
+          python3 scripts/build_direct_registry.py \
             --id "${PLUGIN_ID}" \
             --name "${PLUGIN_NAME}" \
             --version "${VERSION}" \
             --repo "${{ github.server_url }}/${{ github.repository }}" \
+            --tag "v${VERSION}" \
+            --checksums release/checksums.txt \
             --author TaiXu \
             --description "从 AI 聚合网关 0.1.18 移植的反向代理网关" \
             --out registry.json
