@@ -148,6 +148,13 @@ jobs:
 
       # 关键：把 registry.json 提交回 main，让 raw 链接恒定可用。
       # 只在打 tag 时执行；提交信息带 [skip ci] 以免自触发。
+      #
+      # 这一步必须幂等且能容忍并发：
+      #   * registry.json 是上一步刚生成的未跟踪文件，git diff 看不到它，
+      #     所以必须先 git add 再判断 git diff --cached。
+      #   * 重发同名 tag 时 main 上可能已有同样内容 —— 此时跳过即可。
+      #   * 提交期间 main 可能被推进（例如上一次 CI 的提交），push 会被拒，
+      #     因此失败要重试：先 rebase/sync 再推。
       - name: Commit registry.json back to default branch
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -158,15 +165,19 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+
+          # The generated file must exist before we try to publish it.
+          if [[ ! -f registry.json ]]; then
+            echo "registry.json 未生成，跳过提交"
+            exit 0
+          fi
+
           git fetch origin "${DEFAULT_BRANCH}"
           git checkout "${DEFAULT_BRANCH}"
-
-          # 保护 tag 构建期间已被提交的情况：先同步一次远端
+          # Sync with whatever landed while we were building. --ff-only keeps
+          # this linear; a non-fast-forward would mean someone force-pushed.
           git pull --ff-only origin "${DEFAULT_BRANCH}" || true
 
-          # registry.json 由上一步生成在仓库根目录，且尚未被跟踪。
-          # 注意：git diff 看不到未跟踪文件，所以用 git add -N 让 diff 能识别，
-          # 或者直接判断 add 后是否有暂存差异。
           git add -A registry.json
 
           if git diff --cached --quiet -- registry.json; then
@@ -175,8 +186,21 @@ jobs:
           fi
 
           git commit -m "chore: update registry.json to v${VERSION} [skip ci]"
-          git push origin "${DEFAULT_BRANCH}"
-          echo "已提交 registry.json 到 ${DEFAULT_BRANCH}"
+
+          # Retry the push: another run may have advanced the branch between our
+          # fetch and our push, which makes a plain push non-fast-forward.
+          for attempt in 1 2 3; do
+            if git push origin "${DEFAULT_BRANCH}"; then
+              echo "已提交 registry.json 到 ${DEFAULT_BRANCH}"
+              exit 0
+            fi
+            echo "push 被拒（第 ${attempt} 次），同步后重试…"
+            git pull --rebase --autostash origin "${DEFAULT_BRANCH}"
+            sleep $((attempt * 5))
+          done
+
+          echo "::error::registry.json 提交失败：三次重试后仍被拒绝"
+          exit 1
 
       - name: Upload release assets as artifact
         uses: actions/upload-artifact@v4
