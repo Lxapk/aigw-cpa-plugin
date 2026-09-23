@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -550,14 +551,15 @@ func TestExecutorExecuteReportsUpstreamError(t *testing.T) {
 	}
 }
 
-func TestExecutorExecuteStreamForwardsSSEFrames(t *testing.T) {
+func TestExecutorExecuteStreamForwardsBareJSONFrames(t *testing.T) {
 	resetState()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"He\"}}]}\n\n"))
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}],\"usage\":{\"total_tokens\":2}}\n\n"))
+		_, _ = w.Write([]byte(": keep-alive\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"He\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"llo\"}}],\"usage\":{\"total_tokens\":2}}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
@@ -579,23 +581,83 @@ func TestExecutorExecuteStreamForwardsSSEFrames(t *testing.T) {
 	}
 	mustDecode(t, res, &out)
 
-	if len(out.Chunks) == 0 {
-		t.Fatal("expected stream chunks")
+	// Two content frames survive; the heartbeat and [DONE] are dropped.
+	if len(out.Chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2: %q", len(out.Chunks), chunkPayloads(out.Chunks))
 	}
-	var joined strings.Builder
-	for _, c := range out.Chunks {
-		joined.Write(c.Payload)
+
+	for i, c := range out.Chunks {
+		p := c.Payload
+		// CPA's writer adds the SSE framing itself, so the payload must be bare
+		// JSON. A "data:" prefix here produces:
+		//   Unexpected JSON token at offset 5: Expected EOF after parsing
+		if bytes.HasPrefix(p, []byte("data:")) {
+			t.Fatalf("chunk %d still carries the SSE prefix: %q", i, p)
+		}
+		if bytes.ContainsAny(p, "\r\n") {
+			t.Fatalf("chunk %d carries newlines: %q", i, p)
+		}
+		if !json.Valid(p) {
+			t.Fatalf("chunk %d is not valid JSON: %q", i, p)
+		}
 	}
-	all := joined.String()
-	if !strings.Contains(all, "He") || !strings.Contains(all, "llo") {
-		t.Fatalf("chunks lost content: %q", all)
-	}
-	if !strings.Contains(all, "[DONE]") {
-		t.Fatalf("terminal sentinel lost: %q", all)
+
+	joined := string(out.Chunks[0].Payload) + string(out.Chunks[1].Payload)
+	if !strings.Contains(joined, "He") || !strings.Contains(joined, "llo") {
+		t.Fatalf("content lost: %q", joined)
 	}
 }
 
-func TestExecutorExecuteStreamEmitsErrorFrame(t *testing.T) {
+func TestSSEFrameToBareJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		keep bool
+	}{
+		{"plain data frame", "data: {\"a\":1}\n", true},
+		{"no space after colon", "data:{\"a\":1}\n", true},
+		{"trailing crlf", "data: {\"a\":1}\r\n", true},
+		{"done sentinel", "data: [DONE]\n", false},
+		{"heartbeat comment", ": keep-alive\n", false},
+		{"blank separator", "\n", false},
+		{"empty", "", false},
+		{"non-json garbage", "data: oops\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, keep := sseFrameToBareJSON([]byte(c.in))
+			if keep != c.keep {
+				t.Fatalf("keep = %v, want %v (payload=%q)", keep, c.keep, got)
+			}
+			if !keep {
+				return
+			}
+			if !json.Valid(got) {
+				t.Fatalf("payload is not valid JSON: %q", got)
+			}
+			if strings.HasPrefix(string(got), "data:") {
+				t.Fatalf("payload still has SSE prefix: %q", got)
+			}
+			if bytes.ContainsAny(got, "\r\n") {
+				t.Fatalf("payload carries newlines: %q", got)
+			}
+		})
+	}
+}
+
+// TestSSEFrameToBareJSONUnwrapsDoubledPrefix guards against providers that
+// accidentally double-prefix a frame.
+func TestSSEFrameToBareJSONUnwrapsDoubledPrefix(t *testing.T) {
+	got, keep := sseFrameToBareJSON([]byte("data: data: {\"a\":1}\n"))
+	if !keep {
+		t.Fatal("expected the frame to survive")
+	}
+	if string(got) != `{"a":1}` {
+		t.Fatalf("payload = %q", got)
+	}
+}
+
+func TestExecutorExecuteStreamEmitsBareErrorFrame(t *testing.T) {
 	resetState()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -622,9 +684,24 @@ func TestExecutorExecuteStreamEmitsErrorFrame(t *testing.T) {
 	if len(out.Chunks) == 0 {
 		t.Fatal("expected a terminal error chunk")
 	}
-	if !strings.Contains(string(out.Chunks[0].Payload), "upstream_error") {
-		t.Fatalf("chunk = %s", out.Chunks[0].Payload)
+	p := out.Chunks[0].Payload
+	if !json.Valid(p) {
+		t.Fatalf("error chunk must be bare JSON, got %q", p)
 	}
+	if !strings.Contains(string(p), "upstream_error") {
+		t.Fatalf("chunk = %s", p)
+	}
+}
+
+func chunkPayloads(chunks []struct {
+	Payload []byte `json:"Payload"`
+}) string {
+	var b strings.Builder
+	for _, c := range chunks {
+		b.Write(c.Payload)
+		b.WriteString(" | ")
+	}
+	return b.String()
 }
 
 // ---- helpers ------------------------------------------------------------

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -130,10 +131,19 @@ func executorExecute(request []byte) ([]byte, error) {
 
 // executorExecuteStream answers executor.execute_stream.
 //
-// The host collects the returned Chunks slice, so the whole upstream stream is
-// buffered here. WorkBuddy's SSE frames are forwarded verbatim, including the
-// terminal "data: [DONE]" sentinel, so downstream clients see the exact
-// OpenAI-compatible stream they expect.
+// Chunk payload format is subtle and getting it wrong produces
+// "Unexpected JSON token at offset 5: Expected EOF after parsing, but had :"
+// because the outbound layer parses each chunk as bare JSON.
+//
+// CPA only runs its translator when the plugin's output format differs from the
+// client's requested format (adapters_executors.go:552). For WorkBuddy both are
+// "chat-completions", so the translator is skipped and our chunks reach the
+// response writer verbatim. That writer expects **bare JSON per chunk** and adds
+// the "data: " prefix and the SSE blank line itself.
+//
+// Therefore we strip the SSE framing ("data: " prefix, trailing newlines) and
+// forward only the JSON object. The terminal "[DONE]" sentinel is dropped too:
+// CPA emits it after the executor's stream ends.
 func executorExecuteStream(request []byte) ([]byte, error) {
 	req, body, creds, errDecode := decodeExecutorRequest(request)
 	if errDecode != nil {
@@ -148,35 +158,85 @@ func executorExecuteStream(request []byte) ([]byte, error) {
 	var chunks []pluginapi.ExecutorStreamChunk
 	ctx := context.Background()
 	_, headers, errStream := workBuddyUpstream.chatCompletionsStream(ctx, creds, upstreamBody, func(frame []byte) error {
-		// Copy the frame: the reader reuses nothing, but being explicit keeps
-		// the chunk ownership unambiguous.
-		payload := make([]byte, len(frame))
-		copy(payload, frame)
+		payload, keep := sseFrameToBareJSON(frame)
+		if !keep {
+			return nil
+		}
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: payload})
 		return nil
 	})
 	if errStream != nil {
-		// Surface the failure as a terminal chunk so the client sees an error
-		// event rather than a silently truncated stream.
+		// Surface the failure as a terminal error chunk so the client sees an
+		// error event rather than a silently truncated stream.
 		errFrame, _ := json.Marshal(map[string]any{
 			"error": map[string]any{
 				"message": errStream.Error(),
 				"type":    "upstream_error",
 			},
 		})
-		chunks = append(chunks, pluginapi.ExecutorStreamChunk{
-			Payload: append(append([]byte("data: "), errFrame...), []byte("\n\n")...),
-		})
-		return okEnvelope(map[string]any{
-			"headers": filterResponseHeaders(headers),
-			"chunks":  chunks,
+		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: errFrame})
+		return okEnvelope(streamChunkEnvelope{
+			Headers: filterResponseHeaders(headers),
+			Chunks:  chunks,
 		})
 	}
 
-	return okEnvelope(map[string]any{
-		"headers": filterResponseHeaders(headers),
-		"chunks":  chunks,
+	return okEnvelope(streamChunkEnvelope{
+		Headers: filterResponseHeaders(headers),
+		Chunks:  chunks,
 	})
+}
+
+// streamChunkEnvelope mirrors pluginhost.rpcExecutorStreamResponse.
+//
+// pluginapi.ExecutorStreamResponse is not usable here because its Chunks field
+// is a channel meant for in-process consumers; the RPC wire shape carries a
+// concrete slice instead (internal/pluginhost/rpc_schema.go:55).
+type streamChunkEnvelope struct {
+	Headers http.Header                     `json:"headers,omitempty"`
+	Chunks  []pluginapi.ExecutorStreamChunk `json:"chunks,omitempty"`
+}
+
+// sseFrameToBareJSON converts one upstream SSE line into the bare JSON payload
+// CPA's streaming writer expects.
+//
+// Accepted input shapes (the upstream already speaks OpenAI SSE):
+//
+//	"data: {\"id\":...}\n"   -> the JSON object
+//	"data: [DONE]\n"         -> dropped (CPA emits the sentinel itself)
+//	": keep-alive\n"         -> dropped (comment / heartbeat)
+//	"\n"                     -> dropped (frame separator)
+//
+// Anything that is not valid JSON after unwrapping is dropped rather than
+// forwarded, because a malformed frame would abort the whole stream downstream.
+func sseFrameToBareJSON(frame []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(frame)
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+	// SSE comment / heartbeat.
+	if bytes.HasPrefix(trimmed, []byte(":")) {
+		return nil, false
+	}
+	// Unwrap every "data:" prefix (some providers send "data:" without a space).
+	for bytes.HasPrefix(trimmed, []byte("data:")) {
+		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
+	}
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+	// Terminal sentinel: CPA writes this itself after the stream ends.
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return nil, false
+	}
+	// Upstream error frames can be plain text; keep only JSON.
+	if !json.Valid(trimmed) {
+		return nil, false
+	}
+	// Copy: the reader's buffer is reused between calls.
+	out := make([]byte, len(trimmed))
+	copy(out, trimmed)
+	return out, true
 }
 
 // executorCountTokens answers executor.count_tokens.

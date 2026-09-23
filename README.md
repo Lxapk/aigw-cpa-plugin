@@ -274,7 +274,33 @@ curl -N http://127.0.0.1:8317/v1/chat/completions \
 | `/v1/models` 返回空数组 | 还没登录 WorkBuddy，或登录后模型目录没拉到（看日志；上游需 2xx + `code==0`） |
 | 401 `invalid_api_key` | 这是**客户端→CPA** 的鉴权，不是上游问题 |
 | 聊天返回上游错误 | 看响应里的 `upstream_status`；401/403 说明 WorkBuddy token 失效，重新登录 |
+| **`Unexpected JSON token at offset 5: Expected EOF after parsing, but had :`** | **流式 chunk 带了 SSE 的 `data:` 前缀**。CPA 的出站层按裸 JSON 解析每个 chunk，前缀由 CPA 自己加。v0.3.2 已修复，见下方「流式格式」 |
 | **`503 auth_not_found: no auth available (providers=codebuddy, ...)`** | **账号没写进 CPA 的 auth 存储**。见下方「账号落盘」。v0.3.1 已修复两个相关缺陷 |
+
+### 流式 chunk 格式（v0.3.2 修复）
+
+`executor.execute_stream` 返回的每个 chunk **必须是裸 JSON**，不能带 SSE 包装：
+
+```
+✅ 正确:  {"id":"cmb-...","choices":[{"delta":{"content":"你"}}]}
+❌ 错误:  data: {"id":"cmb-...","choices":[...]}\n\n
+❌ 错误:  data: [DONE]\n
+```
+
+原因：CPA 只在「插件输出格式 ≠ 客户端请求格式」时才跑翻译器
+（`internal/pluginhost/adapters_executors.go:552`）。WorkBuddy 两端都是 `chat-completions`，
+所以翻译器被跳过，插件返回的 chunk 会**原样**送到响应写出层 —— 而那一层把每个 chunk
+当裸 JSON 解析，`data:` 前缀会直接触发 `Unexpected JSON token at offset 5`。
+
+因此插件现在会：
+
+1. 剥掉每帧的 `data:` 前缀（兼容 `data:` 与 `data: ` 两种写法）
+2. 丢弃尾部换行
+3. 丢弃 `data: [DONE]` 哨兵（**CPA 自己会补**）
+4. 丢弃 `: keep-alive` 心跳与空行
+5. 丢弃非 JSON 的垃圾帧（避免整条流被一帧坏数据打断）
+
+`data:` 前缀和 SSE 空行由 CPA 负责添加。
 
 ### 账号落盘（v0.3.1 修复）
 
