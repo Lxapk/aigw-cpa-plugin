@@ -59,9 +59,9 @@ jobs:
       - name: Verify module resolves
         run: go mod download
 
-      - name: Install C compiler (arm runner may lack gcc)
+      - name: Install C compiler (cgo dependency for c-shared build)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev || true
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev
 
       - name: Run unit tests
         run: CGO_ENABLED=0 go test ./... -count=1
