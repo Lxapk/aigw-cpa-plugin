@@ -137,7 +137,7 @@ func TestLifecycleConfigOverride(t *testing.T) {
 func TestFrontendAuthAllowNoKeyBypasses(t *testing.T) {
 	resetState()
 	callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{
-		ConfigYAML: []byte("allow_no_key: true\napi_key: sk-secret\n"),
+		ConfigYAML: []byte("enforce_frontend_key: true\nallow_no_key: true\napi_key: sk-secret\n"),
 	})
 	res := callOK(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
 		Method: "POST", Path: "/v1/chat/completions",
@@ -149,45 +149,70 @@ func TestFrontendAuthAllowNoKeyBypasses(t *testing.T) {
 	}
 }
 
-func TestFrontendAuthRejectsMissingAndWrongKey(t *testing.T) {
+// TestFrontendAuthDefersByDefault is the fix for CPA's own api-keys being
+// vetoed: with enforcement off the plugin must never reject a request, because
+// CPA has already authenticated it against the operator's api-keys list.
+func TestFrontendAuthDefersByDefault(t *testing.T) {
 	resetState()
 	callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{
-		ConfigYAML: []byte("allow_no_key: false\napi_key: sk-secret\n"),
+		ConfigYAML: []byte("api_key: sk-secret\n"),
 	})
 
-	// Missing header -> 401 invalid_api_key.
-	errEnv := callErr(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
+	// Even a request with no Authorization header must be accepted (deferred),
+	// otherwise CPA's own auth chain is short-circuited.
+	res := callOK(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
 		Method: "POST", Path: "/v1/chat/completions",
 	})
-	if errEnv.Code != "invalid_api_key" || errEnv.HTTPStatus != http.StatusUnauthorized {
-		t.Fatalf("missing key: got %+v", errEnv)
+	var out pluginapi.FrontendAuthResponse
+	mustDecode(t, res, &out)
+	if !out.Authenticated {
+		t.Fatal("default behaviour must defer to CPA's authentication")
+	}
+	if out.Metadata["workbuddy_auth"] != "delegated" {
+		t.Fatalf("metadata = %v", out.Metadata)
+	}
+}
+
+// TestFrontendAuthEnforcedRejectsWrongKey covers opt-in enforcement.
+func TestFrontendAuthEnforcedRejectsWrongKey(t *testing.T) {
+	resetState()
+	callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{
+		ConfigYAML: []byte("enforce_frontend_key: true\nallow_no_key: false\napi_key: sk-secret\n"),
+	})
+
+	// A missing/wrong key is reported as unauthenticated (not an error), so CPA
+	// passes the request on to its other providers rather than rejecting it.
+	for _, header := range []http.Header{
+		nil,
+		{"Authorization": []string{"Bearer sk-nope"}},
+		{"Authorization": []string{"Basic sk-secret"}},
+	} {
+		res := callOK(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
+			Method: "POST", Path: "/v1/chat/completions", Headers: header,
+		})
+		var out pluginapi.FrontendAuthResponse
+		mustDecode(t, res, &out)
+		if out.Authenticated {
+			t.Fatalf("header %v should not authenticate", header)
+		}
 	}
 
-	// Wrong token -> 401.
-	errEnv = callErr(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Authorization": []string{"Bearer sk-nope"}},
+	// The correct key is accepted.
+	res := callOK(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
+		Method: "POST", Path: "/v1/chat/completions",
+		Headers: http.Header{"Authorization": []string{"Bearer sk-secret"}},
 	})
-	if errEnv.Code != "invalid_api_key" {
-		t.Fatalf("wrong key: got %+v", errEnv)
-	}
-
-	// Non-Bearer scheme -> rejected.
-	errEnv = callErr(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Authorization": []string{"Basic sk-secret"}},
-	})
-	if errEnv.Code != "invalid_api_key" {
-		t.Fatalf("basic scheme: got %+v", errEnv)
+	var out pluginapi.FrontendAuthResponse
+	mustDecode(t, res, &out)
+	if !out.Authenticated {
+		t.Fatal("the configured key must authenticate")
 	}
 }
 
 func TestFrontendAuthAcceptsCorrectKeyCaseInsensitiveScheme(t *testing.T) {
 	resetState()
 	callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{
-		ConfigYAML: []byte("allow_no_key: false\napi_key: sk-secret\n"),
+		ConfigYAML: []byte("enforce_frontend_key: true\nallow_no_key: false\napi_key: sk-secret\n"),
 	})
 	res := callOK(t, pluginabi.MethodFrontendAuthAuthenticate, pluginapi.FrontendAuthRequest{
 		Method:  "POST",
@@ -349,14 +374,14 @@ func TestInterceptRequestStampsRoutingHeaders(t *testing.T) {
 	if out.Terminate {
 		t.Fatal("should not terminate")
 	}
-	if out.Headers.Get("X-AIGW-Provider") != "openai" {
-		t.Fatalf("provider header = %q", out.Headers.Get("X-AIGW-Provider"))
+	if out.Headers.Get("X-WorkBuddy-Provider") != "openai" {
+		t.Fatalf("provider header = %q", out.Headers.Get("X-WorkBuddy-Provider"))
 	}
-	if out.Headers.Get("X-AIGW-Model") != "gpt-4o" {
-		t.Fatalf("model header = %q", out.Headers.Get("X-AIGW-Model"))
+	if out.Headers.Get("X-WorkBuddy-Model") != "gpt-4o" {
+		t.Fatalf("model header = %q", out.Headers.Get("X-WorkBuddy-Model"))
 	}
-	if out.Headers.Get("X-AIGW-Route") != "explicit" {
-		t.Fatalf("route header = %q", out.Headers.Get("X-AIGW-Route"))
+	if out.Headers.Get("X-WorkBuddy-Route") != "explicit" {
+		t.Fatalf("route header = %q", out.Headers.Get("X-WorkBuddy-Route"))
 	}
 	// The explicit prefix must be stripped from the forwarded body.
 	var doc map[string]any
@@ -519,7 +544,7 @@ func TestInterceptResponseRecordsSuccessAndUsage(t *testing.T) {
 		Model:          "gpt-4o",
 		RequestedModel: "gpt-4o",
 		StatusCode:     http.StatusOK,
-		RequestHeaders: http.Header{"X-Aigw-Provider": []string{"openai"}, "X-Aigw-Auth-Id": []string{"acc-1"}},
+		RequestHeaders: http.Header{"X-WorkBuddy-Provider": []string{"openai"}, "X-WorkBuddy-Auth-Id": []string{"acc-1"}},
 		Body:           []byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`),
 	})
 	if len(res) == 0 {
@@ -549,7 +574,7 @@ func TestInterceptResponseClassifiesFailure(t *testing.T) {
 		RequestID:      "r1",
 		Model:          "gpt-4o",
 		StatusCode:     http.StatusUnauthorized,
-		RequestHeaders: http.Header{"X-Aigw-Provider": []string{"openai"}, "X-Aigw-Auth-Id": []string{"acc-1"}},
+		RequestHeaders: http.Header{"X-WorkBuddy-Provider": []string{"openai"}, "X-WorkBuddy-Auth-Id": []string{"acc-1"}},
 		Body:           []byte(`{"error":{"message":"invalid key","code":"invalid_api_key"}}`),
 	})
 
@@ -557,8 +582,16 @@ func TestInterceptResponseClassifiesFailure(t *testing.T) {
 	if totals.TotalFailed != 1 {
 		t.Fatalf("failed = %d, want 1", totals.TotalFailed)
 	}
+	// 401 should mark the credential as cooling down in the pool.
+	// Note: acc-1 was never observed before this call, so it was registered
+	// on the spot (pool.failure creates a lane when none exists).
+	state.pool.observe("openai", "acc-1", "acct")
 	if lane := state.pool.pick("openai", nil, time.Now()); lane != nil {
 		t.Fatal("credential should be cooling down after 401")
+	}
+	// After the cooldown expires it becomes usable again.
+	if lane := state.pool.pick("openai", nil, time.Now().Add(24*time.Hour)); lane == nil {
+		t.Fatal("credential should be usable after the hard cooldown")
 	}
 }
 
@@ -593,7 +626,7 @@ func TestStreamChunkHeaderInit(t *testing.T) {
 		RequestID:       "s1",
 		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 		Model:           "gpt-4o",
-		RequestHeaders:  http.Header{"X-Aigw-Provider": []string{"openai"}},
+		RequestHeaders:  http.Header{"X-WorkBuddy-Provider": []string{"openai"}},
 		ResponseHeaders: http.Header{"Content-Type": []string{"text/event-stream"}},
 	})
 	var out pluginapi.StreamChunkInterceptResponse

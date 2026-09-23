@@ -28,15 +28,15 @@ func handleCheckinRequest(req pluginapi.ManagementRequest) (managementResponse, 
 
 	switch path {
 	case "/checkin":
+		// Legacy path kept for bookmarks: the check-in view is now a tab on the
+		// combined page, so render that instead of a separate screen.
 		if method == http.MethodPost {
-			// A form post from the HTML page: treat as run/config depending on
-			// the "action" field.
 			return handleCheckinPost(req)
 		}
 		return managementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    htmlResponseHeaders(),
-			Body:       []byte(checkinPage()),
+			Body:       []byte(renderMainPage()),
 		}, true
 
 	case "/checkin/status":
@@ -386,7 +386,7 @@ func renderRun(run checkinRun) string {
 func checkinPageHead() string {
 	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width,initial-scale=1">` +
-		`<title>AIGW 反向代理 · 签到</title><style>` +
+		`<title>WorkBuddy · 签到</title><style>` +
 		`:root{color-scheme:light dark}` +
 		`body{font:14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;margin:0;padding:24px;max-width:1080px}` +
 		`h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;opacity:.75}` +

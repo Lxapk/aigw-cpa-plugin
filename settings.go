@@ -35,8 +35,14 @@ type gatewaySettings struct {
 	// APIKey is the client-facing bearer token (V1/o.j()).
 	APIKey string `json:"api_key" yaml:"api_key"`
 	// AllowNoKey mirrors allowNoKey: when true the Authorization header is not
-	// required at all.
+	// required at all. Only consulted when EnforceFrontendKey is on.
 	AllowNoKey bool `json:"allow_no_key" yaml:"allow_no_key"`
+	// EnforceFrontendKey makes this plugin check the client bearer token itself.
+	//
+	// Default false: CPA already authenticates /v1/* against its own api-keys
+	// before a provider is reached, so a second mandatory gate here would reject
+	// every one of the operator's existing CPA keys.
+	EnforceFrontendKey bool `json:"enforce_frontend_key" yaml:"enforce_frontend_key"`
 	// ExposeLAN mirrors exposeLan (bind 0.0.0.0 vs 127.0.0.1). Reported only.
 	ExposeLAN bool `json:"expose_lan" yaml:"expose_lan"`
 	// OnlyUsableModels mirrors onlyUsableModels: hide models whose provider

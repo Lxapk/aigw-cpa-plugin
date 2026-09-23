@@ -496,13 +496,14 @@ func TestRoutingResetEndpoint(t *testing.T) {
 func TestMainPageShowsStrategySection(t *testing.T) {
 	resetState()
 	installAuthList(t, nil)
-	page := mainPage()
+	page := renderMainPage()
 	for _, want := range []string{"账号切换策略", "按额度", "轮巡", "随机", "应用策略", "重置轮巡位置"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("combined page missing %q", want)
 		}
 	}
-	if !strings.Contains(page, `href="#sec-routing"`) {
-		t.Error("expected a nav link to the strategy section")
+	// The strategy view is a tab on the combined page, not a separate screen.
+	if !strings.Contains(page, `data-tab="tab-switch"`) {
+		t.Error("expected a tab for the switching strategy")
 	}
 }

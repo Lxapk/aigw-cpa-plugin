@@ -470,14 +470,9 @@ func TestNextCheckinTimeDisabled(t *testing.T) {
 func TestManagementRegistersCheckinResource(t *testing.T) {
 	resetState()
 	reg := managementRegistration()
-	var found bool
-	for _, r := range reg.Resources {
-		if r.Path == "/checkin" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("check-in resource not registered: %+v", reg.Resources)
+	// A single menu entry is registered; check-in lives behind its tab bar.
+	if len(reg.Resources) != 1 || reg.Resources[0].Path != "home" {
+		t.Fatalf("expected exactly one combined resource, got %+v", reg.Resources)
 	}
 }
 
@@ -517,9 +512,9 @@ func TestCheckinPageRenders(t *testing.T) {
 		t.Fatalf("status = %d", mr.StatusCode)
 	}
 	body := string(mr.Body)
-	for _, want := range []string{"手动签到", "自动签到", "立即为所有账号签到"} {
+	for _, want := range []string{"自动签到", "立即签到", "签到 + 刷新积分"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("page missing %q", want)
+			t.Errorf("combined page missing %q", want)
 		}
 	}
 }

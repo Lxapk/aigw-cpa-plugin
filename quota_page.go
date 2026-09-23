@@ -29,13 +29,15 @@ func handleQuotaRequest(req pluginapi.ManagementRequest) (managementResponse, bo
 
 	switch path {
 	case "/quota":
+		// Legacy path kept for bookmarks: the credits view is now a tab on the
+		// combined page.
 		if method == http.MethodPost {
 			return handleQuotaPost(req)
 		}
 		return managementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    htmlResponseHeaders(),
-			Body:       []byte(quotaPage()),
+			Body:       []byte(renderMainPage()),
 		}, true
 
 	case "/quota/status":
@@ -309,7 +311,7 @@ func toBool(v any) bool {
 func quotaPageHead() string {
 	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width,initial-scale=1">` +
-		`<title>AIGW 反向代理 · 额度</title><style>` +
+		`<title>WorkBuddy · 额度</title><style>` +
 		`:root{color-scheme:light dark}` +
 		`body{font:14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;margin:0;padding:24px;max-width:1080px}` +
 		`h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;opacity:.75}` +

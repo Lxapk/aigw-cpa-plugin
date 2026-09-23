@@ -22,7 +22,10 @@ func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Resources: []pluginapi.ResourceRoute{
 			{
-				// The single combined view is the primary entry point.
+				// A single menu entry. Everything — accounts, switching
+				// strategy, check-in, credits, usage, settings — lives behind
+				// the tab bar on this page, so there is no reason to add more
+				// entries to CPA's sidebar.
 				//
 				// The path must not be "/": CPA normalizes a resource path with
 				// strings.TrimRight(path, "/") and rejects the result when it
@@ -30,18 +33,8 @@ func managementRegistration() managementRegistrationResponse {
 				// root resource is logged as "declared invalid resource route /"
 				// and silently dropped — the menu entry then never appears.
 				Path:        "home",
-				Menu:        "AIGW 反向代理",
-				Description: "WorkBuddy 账号、签到、额度与调用统计，全部集中在这一页。",
-			},
-			{
-				Path:        "/checkin",
-				Menu:        "AIGW 签到",
-				Description: "仅签到视图（也包含在主页内）。",
-			},
-			{
-				Path:        "/quota",
-				Menu:        "AIGW 额度",
-				Description: "仅额度视图（也包含在主页内）。",
+				Menu:        "WorkBuddy",
+				Description: "WorkBuddy 账号、切换策略、签到、积分与调用统计，全部集中在这一页。",
 			},
 		},
 		Routes: []pluginapi.ManagementRoute{
@@ -76,12 +69,12 @@ func managementRegistration() managementRegistrationResponse {
 			{
 				Method:      http.MethodGet,
 				Path:        "/aigw-reverse-proxy/status",
-				Description: "AIGW reverse-proxy plugin status as JSON.",
+				Description: "WorkBuddy plugin status as JSON.",
 			},
 			{
 				Method:      http.MethodGet,
 				Path:        "/aigw-reverse-proxy/calls",
-				Description: "Recent reverse-proxy calls recorded by the AIGW plugin.",
+				Description: "Recent reverse-proxy calls recorded by the WorkBuddy plugin.",
 			},
 			// The check-in page itself is also mounted on the management path so
 			// the browser can land there directly (and after a form POST).
@@ -299,7 +292,7 @@ func statusPage() string {
 	var b strings.Builder
 	b.WriteString("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">")
 	b.WriteString("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
-	b.WriteString("<title>AIGW 反向代理插件</title>")
+	b.WriteString("<title>WorkBuddy 反向代理插件</title>")
 	b.WriteString("<style>")
 	b.WriteString(":root{color-scheme:light dark}body{font:14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;margin:0;padding:24px;max-width:1080px}")
 	b.WriteString("h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;opacity:.75}")
@@ -310,7 +303,7 @@ func statusPage() string {
 	b.WriteString(".card b{display:block;font-size:22px;line-height:1.2}")
 	b.WriteString("</style></head><body>")
 
-	b.WriteString("<h1>AI 聚合网关 · 反向代理插件</h1>")
+	b.WriteString("<h1>WorkBuddy · 反向代理插件</h1>")
 	b.WriteString("<div class=\"muted\">端口 <code>" + fmt.Sprint(settings.Port) + "</code> · 默认供应商 <code>" + html.EscapeString(settings.DefaultProvider) + "</code> · CPA 负责监听</div>")
 
 	b.WriteString("<h2>调用统计</h2><div class=\"cards\">")

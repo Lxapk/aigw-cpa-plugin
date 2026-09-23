@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "aigw-reverse-proxy"
-	pluginVersion = "0.8.6"
+	pluginVersion = "0.9.0"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -242,7 +242,8 @@ func buildRegistration() registration {
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "port", Type: pluginapi.ConfigFieldTypeInteger, Description: "Original gateway listen port (reported for parity; CPA owns the listener)."},
 				{Name: "api_key", Type: pluginapi.ConfigFieldTypeString, Description: "Client bearer token required on inbound requests (V1/o.j)."},
-				{Name: "allow_no_key", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Allow requests without an Authorization header (V1/s.allowNoKey)."},
+				{Name: "allow_no_key", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Allow requests without an Authorization header (V1/s.allowNoKey). Only used when enforce_frontend_key is on."},
+				{Name: "enforce_frontend_key", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Check the client bearer token in this plugin. Leave off so CPA's own api-keys keep working."},
 				{Name: "expose_lan", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reported for parity (V1/s.exposeLan)."},
 				{Name: "only_usable_models", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Hide models whose provider marks them unavailable (V1/s.onlyUsableModels)."},
 				{Name: "refresh_skew_seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Refresh credentials this far ahead of expiry (V1/s.refreshSkewSeconds)."},

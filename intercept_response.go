@@ -139,23 +139,23 @@ func resolveContext(requestID string, headers http.Header, model, requestedModel
 		ctx = c
 	}
 
-	if provider := headerValue(headers, "X-AIGW-Provider"); provider != "" {
+	if provider := headerValue(headers, "X-WorkBuddy-Provider"); provider != "" {
 		ctx.Provider = provider
 	}
-	if m := headerValue(headers, "X-AIGW-Model"); m != "" {
+	if m := headerValue(headers, "X-WorkBuddy-Model"); m != "" {
 		ctx.Model = m
 	} else if ctx.Model == "" {
 		ctx.Model = model
 	}
-	if rm := headerValue(headers, "X-AIGW-Requested-Model"); rm != "" {
+	if rm := headerValue(headers, "X-WorkBuddy-Requested-Model"); rm != "" {
 		ctx.RequestedModel = rm
 	} else if ctx.RequestedModel == "" {
 		ctx.RequestedModel = requestedModel
 	}
-	if uid := headerValue(headers, "X-AIGW-Auth-Id"); uid != "" {
+	if uid := headerValue(headers, "X-WorkBuddy-Auth-Id"); uid != "" {
 		ctx.UID = uid
 	}
-	if label := headerValue(headers, "X-AIGW-Auth-Label"); label != "" {
+	if label := headerValue(headers, "X-WorkBuddy-Auth-Label"); label != "" {
 		ctx.Label = label
 	}
 

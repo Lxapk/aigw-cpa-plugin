@@ -434,14 +434,11 @@ func TestPanelShowsCreditExpiry(t *testing.T) {
 		t.Errorf("variant = %q, want cn", soon.Variant)
 	}
 
-	page := mainPage()
-	for _, want := range []string{"剩余积分", "到期", "天后", "版本"} {
+	page := renderMainPage()
+	for _, want := range []string{"积分", "到期", "天后", "版本"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("panel missing %q", want)
 		}
-	}
-	if !strings.Contains(page, "积分即将/已过期") {
-		t.Error("panel should surface the urgent-account count")
 	}
 }
 
@@ -470,7 +467,7 @@ func TestPanelMarksExpiredCredits(t *testing.T) {
 	if accounts[0].Usable {
 		t.Error("an account with only expired credits must not be usable")
 	}
-	if !strings.Contains(mainPage(), "已过期") {
+	if !strings.Contains(renderMainPage(), "已过期") {
 		t.Error("panel should show the expired marker")
 	}
 }

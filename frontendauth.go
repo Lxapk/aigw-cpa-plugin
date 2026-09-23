@@ -11,21 +11,28 @@ import (
 
 // frontendAuth is the port of V1/o.j(Session) from AI 聚合网关 0.1.18.
 //
-// Original smali:
+// # IMPORTANT — how this differs from the source gateway
 //
-//	settings := engine.settings
-//	if settings.allowNoKey { return true }
-//	if settings.apiKey.isEmpty() { return false }
-//	auth := session.headers["authorization"]            // lower-cased by NanoHTTPD
-//	if !auth.startsWith("Bearer ", ignoreCase=true) { return false }
-//	token := auth.substring(7)
-//	return MessageDigest.isEqual(token.toByteArray(UTF_8), apiKey.toByteArray(UTF_8))
+// The APK was a standalone gateway, so its bearer check was the only gate in
+// front of the proxy. CPA is different: every CPA deployment already has its own
+// front-end authentication (the `api-keys` list, plus any other access
+// providers) applied to /v1/* before a request reaches a provider. Registering a
+// second mandatory gate here means an operator's existing CPA keys stop working
+// the moment this plugin is enabled — the failure reads
+// `{"error":"Missing API key"}` with a 401, even though the key is perfectly
+// valid for CPA.
 //
-// The constant-time comparison is preserved via crypto/subtle.
+// The capability therefore behaves as an *additional* accepted credential rather
+// than a replacement:
 //
-// Note on paths: CPA applies frontend authentication to the whole proxy
-// surface, whereas the app only guarded the AI routes and left /healthz and
-// /authorize open. We mirror that by exempting the same two paths.
+//   - disabled by default (EnforceFrontendKey = false): the plugin never rejects
+//     anything, so CPA's own authentication decides
+//   - when enabled: a request carrying the configured api_key is accepted here;
+//     anything else is reported as unauthenticated, which CPA maps to
+//     "not handled" and passes on to the other providers
+//
+// That keeps the source gateway's behaviour available for a locked-down
+// deployment without breaking the host's own auth.
 func frontendAuth(request []byte) ([]byte, error) {
 	var req pluginapi.FrontendAuthRequest
 	if len(request) > 0 {
@@ -34,66 +41,76 @@ func frontendAuth(request []byte) ([]byte, error) {
 		}
 	}
 
-	if isOpenPath(req.Path) {
+	settings := state.settings.get()
+
+	// Not enforcing: defer entirely to CPA's own authentication.
+	//
+	// Note this also covers the source app's allowNoKey=true case, which is why
+	// there is no separate branch for it below.
+	if !settings.EnforceFrontendKey {
 		return okEnvelope(pluginapi.FrontendAuthResponse{
 			Authenticated: true,
-			Principal:     "anonymous",
-			Metadata:      map[string]string{"aigw_path": "public"},
+			Principal:     principalFromHeaders(req.Headers),
+			Metadata: map[string]string{
+				"workbuddy_auth": "delegated",
+			},
 		})
 	}
 
-	settings := state.settings.get()
+	// Enforcing but no key configured: nothing to compare against, so defer
+	// rather than lock everyone out.
+	if settings.APIKey == "" {
+		return okEnvelope(pluginapi.FrontendAuthResponse{
+			Authenticated: true,
+			Principal:     principalFromHeaders(req.Headers),
+			Metadata:      map[string]string{"workbuddy_auth": "no_key_configured"},
+		})
+	}
 
-	// V1/o.j(): allowNoKey short-circuits the whole check.
+	// When enforcement is on, the source app's allowNoKey still short-circuits.
 	if settings.AllowNoKey {
 		return okEnvelope(pluginapi.FrontendAuthResponse{
 			Authenticated: true,
 			Principal:     principalFromHeaders(req.Headers),
-			Metadata:      map[string]string{"aigw_auth": "allow_no_key"},
+			Metadata:      map[string]string{"workbuddy_auth": "allow_no_key"},
 		})
-	}
-
-	// V1/o.j(): an empty configured key with allowNoKey=false can never pass.
-	if settings.APIKey == "" {
-		return denied("invalid_api_key",
-			"网关已关闭「无 Key 调用」但尚未设置 API Key，请先配置 plugins.configs."+pluginName+".api_key")
 	}
 
 	raw := headerValue(req.Headers, "authorization")
 	if raw == "" {
-		return denied("invalid_api_key", "缺少或错误的 API Key")
+		return unauthenticated("缺少或错误的 API Key")
 	}
 
 	// V1/o.j(): case-insensitive "Bearer " prefix, then substring(7).
 	const bearer = "bearer "
 	if len(raw) < len(bearer) || !strings.EqualFold(raw[:len(bearer)], bearer) {
-		return denied("invalid_api_key", "缺少或错误的 API Key")
+		return unauthenticated("缺少或错误的 API Key")
 	}
 	token := raw[len(bearer):]
 
 	// MessageDigest.isEqual -> constant-time comparison.
 	if subtle.ConstantTimeCompare([]byte(token), []byte(settings.APIKey)) != 1 {
-		return denied("invalid_api_key", "缺少或错误的 API Key")
+		return unauthenticated("缺少或错误的 API Key")
 	}
 
 	return okEnvelope(pluginapi.FrontendAuthResponse{
 		Authenticated: true,
 		Principal:     principalFromHeaders(req.Headers),
-		Metadata:      map[string]string{"aigw_auth": "bearer"},
+		Metadata:      map[string]string{"workbuddy_auth": "bearer"},
 	})
 }
 
-// denied renders the authentication failure envelope.
+// unauthenticated reports a request this provider declined to authenticate.
 //
-// V1/o.j() returning false leads V1/o.k() to emit:
-//
-//	l(401, "invalid_api_key", msg)
-//	-> {"error":{"message":msg,"type":"api_error","code":"invalid_api_key"}}
-//
-// CPA's frontend auth rejects with HTTP 401 authentication_error; the message
-// still carries the ported wording so behaviour is recognisably the same.
-func denied(code, message string) ([]byte, error) {
-	return errorEnvelope(code, message, http.StatusUnauthorized), nil
+// CPA maps `Authenticated:false` to sdkaccess.NotHandledError
+// (internal/pluginhost/adapters_auth.go:135), so the other access providers —
+// including CPA's own api-keys list — still get their chance. Returning a hard
+// 401 here would veto the whole chain.
+func unauthenticated(message string) ([]byte, error) {
+	return okEnvelope(pluginapi.FrontendAuthResponse{
+		Authenticated: false,
+		Metadata:      map[string]string{"workbuddy_error": message},
+	})
 }
 
 // isOpenPath mirrors the unauthenticated routes of V1/o.e(Session):
@@ -128,11 +145,11 @@ func headerValue(headers http.Header, key string) string {
 // principalFromHeaders names the caller for CPA's request log, preferring the
 // client-supplied identifiers the app also surfaced.
 func principalFromHeaders(headers http.Header) string {
-	if v := headerValue(headers, "X-AIGW-Account"); v != "" {
+	if v := headerValue(headers, "X-WorkBuddy-Account"); v != "" {
 		return v
 	}
 	if v := headerValue(headers, "X-Client-Id"); v != "" {
 		return v
 	}
-	return "aigw-client"
+	return "workbuddy-client"
 }

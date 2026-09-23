@@ -461,14 +461,8 @@ func TestClampIntervalMinutes(t *testing.T) {
 func TestQuotaResourceRegistered(t *testing.T) {
 	resetState()
 	reg := managementRegistration()
-	var found bool
-	for _, r := range reg.Resources {
-		if r.Path == "/quota" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("quota resource not registered: %+v", reg.Resources)
+	if len(reg.Resources) != 1 || reg.Resources[0].Path != "home" {
+		t.Fatalf("expected exactly one combined resource, got %+v", reg.Resources)
 	}
 }
 
@@ -507,9 +501,9 @@ func TestQuotaPageRenders(t *testing.T) {
 		t.Fatalf("status=%d len=%d", mr.StatusCode, len(mr.Body))
 	}
 	page := string(mr.Body)
-	for _, want := range []string{"已知额度合计", "立即刷新全部额度", "自动刷新", "账号选用顺序"} {
+	for _, want := range []string{"积分合计", "立即刷新积分", "自动刷新积分"} {
 		if !strings.Contains(page, want) {
-			t.Errorf("page missing %q", want)
+			t.Errorf("combined page missing %q", want)
 		}
 	}
 	// Same key-handling design as the check-in page.

@@ -294,17 +294,17 @@ func TestSinglePageContainsEverything(t *testing.T) {
 			"storage_json": mustStorage(t, map[string]any{"accessToken": "at", "uid": "u-1", "domain": "cn"})},
 	})
 
-	page := mainPage()
+	page := renderMainPage()
 	for _, want := range []string{
-		"管理密钥",         // key section
-		"WorkBuddy 账号", // account list
-		"账号总数",         // account summary
-		"签到设置",         // check-in schedule
-		"额度刷新设置",       // quota schedule
-		"调用统计",         // usage
-		"网关设置",         // gateway config
-		"一键：签到 + 刷新额度",
-		"Acct One", // the account is rendered server-side
+		"管理密钥",      // key section lives in the settings tab
+		"账号列表",      // account list
+		"账号总数",      // account summary
+		"自动签到",      // check-in schedule
+		"自动刷新积分",    // quota schedule
+		"最近调用",      // usage
+		"网关设置",      // gateway config
+		"签到 + 刷新积分", // one-click action
+		"Acct One",  // the account is rendered server-side
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("combined page missing %q", want)
@@ -314,9 +314,11 @@ func TestSinglePageContainsEverything(t *testing.T) {
 	if strings.Contains(page, "<form") {
 		t.Error("combined page must not use HTML forms")
 	}
-	// Anchor navigation for the single-page layout.
-	if !strings.Contains(page, `href="#sec-accounts"`) {
-		t.Error("expected in-page navigation")
+	// Every feature is reachable from one tab bar rather than separate screens.
+	for _, tab := range []string{"tab-accounts", "tab-switch", "tab-checkin", "tab-credits", "tab-usage", "tab-settings"} {
+		if !strings.Contains(page, `data-tab="`+tab+`"`) {
+			t.Errorf("expected a tab %q", tab)
+		}
 	}
 }
 
@@ -581,5 +583,64 @@ func TestManagementRoutesCarryPluginPrefix(t *testing.T) {
 		if strings.HasPrefix(r.Path, "/"+pluginName) {
 			t.Errorf("resource route %q must be relative — CPA prepends the plugin id", r.Path)
 		}
+	}
+}
+
+// ---- page script integrity ---------------------------------------------
+
+// TestPageScriptDefinesEveryCalledFunction guards a real defect: the tab
+// helpers were concatenated without their <script> wrapper, so the browser threw
+// "Uncaught ReferenceError: restoreTab is not defined" and the tab bar never
+// initialised.
+//
+// The check is deliberately simple — collect the identifiers a script calls
+// without qualification and require each to be declared somewhere in the served
+// page — because that is exactly the failure mode.
+func TestPageScriptDefinesEveryCalledFunction(t *testing.T) {
+	resetState()
+	page := renderMainPage()
+
+	// Every JS block must be inside <script> tags, and unbalanced tags are a
+	// symptom of the concatenation bug.
+	if strings.Count(page, "<script>") != strings.Count(page, "</script>") {
+		t.Fatalf("unbalanced <script> tags: %d open, %d close",
+			strings.Count(page, "<script>"), strings.Count(page, "</script>"))
+	}
+
+	for _, name := range []string{"showTab", "restoreTab"} {
+		if !strings.Contains(page, "function "+name+"(") {
+			t.Errorf("helper %s is not declared in the served page", name)
+		}
+		// A declaration that sits outside any <script> block is inert.
+		decl := strings.Index(page, "function "+name+"(")
+		open := strings.LastIndex(page[:decl], "<script>")
+		close := strings.LastIndex(page[:decl], "</script>")
+		if open < 0 || close > open {
+			t.Errorf("function %s is declared outside a <script> block", name)
+		}
+	}
+
+	// Handlers the markup references must exist too.
+	for _, handler := range []string{
+		"runAll", "refreshAccounts", "saveStrategy", "resetRotation",
+		"runCheckin", "saveCheckinSettings", "refreshQuota", "saveQuotaSettings",
+		"saveKey", "clearKey",
+	} {
+		if !strings.Contains(page, "window."+handler+" =") {
+			t.Errorf("handler %s is referenced by the markup but never defined", handler)
+		}
+	}
+}
+
+// TestPageUsesWorkBuddyNaming keeps the rebrand consistent: no AIGW wording
+// should reach the operator's screen.
+func TestPageUsesWorkBuddyNaming(t *testing.T) {
+	resetState()
+	page := renderMainPage()
+	if strings.Contains(page, "AIGW") {
+		t.Error("page still shows the old AIGW name")
+	}
+	if !strings.Contains(page, "WorkBuddy") {
+		t.Error("page should present the WorkBuddy name")
 	}
 }

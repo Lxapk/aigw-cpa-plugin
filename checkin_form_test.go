@@ -165,8 +165,8 @@ func TestCheckinResourcePageServedForGet(t *testing.T) {
 	if len(mr.Body) == 0 {
 		t.Fatal("empty body — blank page symptom")
 	}
-	if !strings.Contains(string(mr.Body), "立即为所有账号签到") {
-		t.Fatal("page did not render the manual button")
+	if !strings.Contains(string(mr.Body), "立即签到") {
+		t.Fatal("page did not render the manual check-in button")
 	}
 }
 

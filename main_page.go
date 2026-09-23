@@ -11,19 +11,312 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// This file renders the plugin's single combined page.
+// renderMainPage builds the plugin's single management page.
 //
-// Everything an operator needs lives here:
+// Everything the operator needs lives here behind a tab bar — accounts,
+// switching strategy, check-in, credits, usage and gateway settings. Before
+// this, each feature had its own resource route and menu entry, which meant
+// hopping between pages to do one job.
 //
-//	1. management key (browser-local)
-//	2. account list      — read straight from the auth store, so a fresh login
-//	                       shows up without any traffic
-//	3. check-in          — manual run + daily schedule
-//	4. quota             — manual refresh + interval + per-account credits
-//	5. usage summary and recent calls
-//
-// The check-in and quota pages remain reachable at their own paths for
-// bookmarks and scripts, but the combined page is what the CPA menu links to.
+// The markup is intentionally plain: CPA renders these pages inside its own
+// panel, so the layout must be responsive and must not assume it owns the
+// viewport. Styling comes from uiCSS.
+func renderMainPage() string {
+	settings := state.settings.get()
+	accounts := listWorkBuddyAccounts()
+	total, usable, known, credits := accountSummary(accounts)
+	totals := state.log.totals()
+
+	state.quota.mu.Lock()
+	quotaRunning := state.quota.running
+	state.quota.mu.Unlock()
+	state.checkin.mu.Lock()
+	checkinRunning := state.checkin.running
+	state.checkin.mu.Unlock()
+
+	checkinHistory := state.checkin.snapshot(1)
+	recentCalls := state.log.recent(12)
+
+	var b strings.Builder
+	b.WriteString(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">`)
+	b.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	b.WriteString(`<title>WorkBuddy</title><style>` + uiCSS + `</style></head><body><div class="root">`)
+
+	// ---------------- hero ----------------
+	b.WriteString(`<div class="hero"><div>`)
+	b.WriteString(`<h1>WorkBuddy</h1>`)
+	b.WriteString(`<div class="sub">把 WorkBuddy 账号反代为 CPA 的 OpenAI 兼容接口：账号轮换、模型输出、签到与积分管理。</div>`)
+	b.WriteString(`</div><div class="badge"><span class="dot"></span>`)
+	if quotaRunning || checkinRunning {
+		b.WriteString(`任务执行中…`)
+	} else {
+		b.WriteString(fmt.Sprintf(`%d 个账号可用`, usable))
+	}
+	b.WriteString(`</div></div>`)
+
+	// ---------------- tabs ----------------
+	b.WriteString(`<div class="tabs">`)
+	tab := func(id, label string, first bool) {
+		cls := ""
+		if first {
+			cls = ` class="active"`
+		}
+		b.WriteString(`<button type="button" data-tab="` + id + `"` + cls +
+			` onclick="showTab('` + id + `', this)">` + html.EscapeString(label) + `</button>`)
+	}
+	tab("tab-accounts", "账号", true)
+	tab("tab-switch", "账号切换", false)
+	tab("tab-checkin", "签到", false)
+	tab("tab-credits", "积分", false)
+	tab("tab-usage", "统计", false)
+	tab("tab-settings", "设置", false)
+	b.WriteString(`</div>`)
+
+	// ---------------- tab: accounts ----------------
+	b.WriteString(`<div id="tab-accounts" class="panel active">`)
+	b.WriteString(`<div class="grid stats">`)
+	stat := func(k string, v any) {
+		b.WriteString(`<div class="stat"><div class="v">` +
+			html.EscapeString(fmt.Sprint(v)) + `</div><div class="k">` +
+			html.EscapeString(k) + `</div></div>`)
+	}
+	stat("账号总数", total)
+	stat("可用账号", usable)
+	creditsText := "—"
+	if known > 0 {
+		creditsText = fmt.Sprint(credits)
+	}
+	stat("积分合计", creditsText)
+	stat("已查积分", fmt.Sprintf("%d / %d", known, total))
+	b.WriteString(`</div>`)
+
+	b.WriteString(`<div class="card"><h2>账号列表 <span class="hint">读取自 CPA 认证存储，登录后立即可见</span></h2>`)
+	if len(accounts) == 0 {
+		b.WriteString(`<div class="empty">还没有 WorkBuddy 账号。请到 CPA 的「认证」页登录。</div>`)
+	} else {
+		b.WriteString(`<table><thead><tr>`)
+		b.WriteString(`<th>账号</th><th>UID</th><th>版本</th><th class="num">积分</th><th>到期</th><th>状态</th></tr></thead><tbody>`)
+		for _, a := range accounts {
+			pillClass, statusText := "ok", "可用"
+			detail := ""
+			switch {
+			case a.Disabled:
+				pillClass, statusText = "bad", "已停用"
+				detail = a.Reason
+			case a.Expired:
+				pillClass, statusText = "bad", "凭据过期"
+				detail = "请重新登录"
+			case a.CreditsExpired:
+				pillClass, statusText = "bad", "积分过期"
+			case !a.CooldownUntil.IsZero() && time.Now().Before(a.CooldownUntil):
+				pillClass, statusText = "warn", "冷却中"
+				detail = a.CooldownUntil.Local().Format("15:04:05")
+			}
+			cv := "—"
+			if a.CreditsKnown {
+				cv = fmt.Sprint(a.Credits)
+			}
+			expiry, expiryClass := "—", "muted"
+			switch {
+			case a.CreditsExpired:
+				expiry, expiryClass = "已过期", "bad"
+			case a.CreditsExpireAt > 0 && a.CreditsExpiringSoon:
+				expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "warn"
+			case a.CreditsExpireAt > 0:
+				expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "muted"
+			}
+			b.WriteString(`<tr><td><strong>` + html.EscapeString(a.Label) + `</strong></td>`)
+			b.WriteString(`<td><code>` + html.EscapeString(firstNonEmpty(a.UID, a.AuthIndex)) + `</code></td>`)
+			b.WriteString(`<td><span class="pill idle">` + html.EscapeString(a.Variant) + `</span></td>`)
+			b.WriteString(`<td class="num">` + html.EscapeString(cv) + `</td>`)
+			b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
+			b.WriteString(`<td><span class="pill ` + pillClass + `">` + statusText + `</span>`)
+			if detail != "" {
+				b.WriteString(` <span class="muted small">` + html.EscapeString(detail) + `</span>`)
+			}
+			b.WriteString(`</td></tr>`)
+		}
+		b.WriteString(`</tbody></table>`)
+	}
+	if warn := state.accounts.lastError(); warn != "" {
+		b.WriteString(`<div class="note bad">读取账号列表失败：` + html.EscapeString(warn) + `</div>`)
+	}
+	b.WriteString(`</div>`)
+
+	b.WriteString(`<div class="card"><h2>一键操作</h2><div class="row">`)
+	b.WriteString(`<button type="button" id="btnRun" onclick="runAll()"`)
+	if quotaRunning || checkinRunning {
+		b.WriteString(` disabled`)
+	}
+	b.WriteString(`>签到 + 刷新积分</button>`)
+	b.WriteString(`<button type="button" class="ghost" onclick="refreshAccounts()">刷新列表</button>`)
+	b.WriteString(`<span class="muted small" id="runMsg"></span></div>`)
+	b.WriteString(`<div id="runResult"></div></div>`)
+	b.WriteString(`</div>`)
+
+	// ---------------- tab: switching strategy ----------------
+	routing := routingStatusJSON()
+	b.WriteString(`<div id="tab-switch" class="panel">`)
+	b.WriteString(`<div class="card"><h2>账号切换策略 <span class="hint">请求如何在这些账号之间分配</span></h2>`)
+	options, _ := routing["options"].([]map[string]any)
+	current, _ := routing["strategy"].(string)
+	for _, opt := range options {
+		value, _ := opt["value"].(string)
+		label, _ := opt["label"].(string)
+		desc, _ := opt["description"].(string)
+		b.WriteString(`<label class="opt"><input type="radio" name="strategy" value="` +
+			html.EscapeString(value) + `"`)
+		if value == current {
+			b.WriteString(` checked`)
+		}
+		b.WriteString(`><span><span class="name">` + html.EscapeString(label) + `</span><br>` +
+			`<span class="desc">` + html.EscapeString(desc) + `</span></span></label>`)
+	}
+	b.WriteString(`<div class="row">`)
+	b.WriteString(`<button type="button" onclick="saveStrategy()">应用策略</button>`)
+	b.WriteString(`<button type="button" class="ghost" onclick="resetRotation()">重置轮巡位置</button>`)
+	b.WriteString(`<span class="muted small" id="strategyMsg"></span></div>`)
+	b.WriteString(`<div class="note">当前：<b>` + html.EscapeString(fmt.Sprint(routing["strategy_label"])) +
+		`</b> · ` + html.EscapeString(nextRotationHint()) + `</div>`)
+	b.WriteString(`</div>`)
+
+	if rows, okRows := routing["order"].([]map[string]any); okRows && len(rows) > 0 {
+		b.WriteString(`<div class="card"><h2>选择顺序预览</h2>`)
+		b.WriteString(`<table><thead><tr><th class="num">#</th><th>账号</th><th class="num">积分</th><th class="num">已选中</th></tr></thead><tbody>`)
+		for _, row := range rows {
+			cv := "—"
+			if knownValue, _ := row["known"].(bool); knownValue {
+				cv = fmt.Sprint(row["credits"])
+			}
+			b.WriteString(`<tr><td class="num">` + fmt.Sprint(row["position"]) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(fmt.Sprint(row["label"])) + `</td>`)
+			b.WriteString(`<td class="num">` + html.EscapeString(cv) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprint(row["picks"]) + `</td></tr>`)
+		}
+		b.WriteString(`</tbody></table></div>`)
+	} else {
+		b.WriteString(`<div class="card"><div class="empty">暂无可用账号，无法预览顺序。</div></div>`)
+	}
+	b.WriteString(`</div>`)
+
+	// ---------------- tab: check-in ----------------
+	b.WriteString(`<div id="tab-checkin" class="panel">`)
+	b.WriteString(`<div class="card"><h2>自动签到</h2>`)
+	b.WriteString(`<div class="row tight"><label class="field"><input type="checkbox" id="ckEnabled"`)
+	if settings.Checkin.Enabled {
+		b.WriteString(` checked`)
+	}
+	b.WriteString(`> 启用每日自动签到</label></div>`)
+	b.WriteString(`<div class="row tight"><label class="field">每天 <input type="number" id="ckHour" min="0" max="23" value="` +
+		fmt.Sprint(clampHour(settings.Checkin.Hour)) + `"> 时 <input type="number" id="ckMinute" min="0" max="59" value="` +
+		fmt.Sprint(clampMinute(settings.Checkin.Minute)) + `"> 分执行</label></div>`)
+	b.WriteString(`<div class="row tight"><label class="field"><input type="checkbox" id="ckOnStart"`)
+	if settings.Checkin.OnStart {
+		b.WriteString(` checked`)
+	}
+	b.WriteString(`> 启动时补跑（当天尚未执行时）</label></div>`)
+	b.WriteString(`<div class="row"><button type="button" onclick="saveCheckinSettings()">保存</button>`)
+	b.WriteString(`<button type="button" class="ghost" onclick="runCheckin()">立即签到</button></div>`)
+	b.WriteString(`</div>`)
+
+	b.WriteString(`<div class="card"><h2>最近一次签到</h2>`)
+	if len(checkinHistory) == 0 {
+		b.WriteString(`<div class="empty">还没有签到记录。</div>`)
+	} else {
+		b.WriteString(renderRun(checkinHistory[0]))
+	}
+	b.WriteString(`</div></div>`)
+
+	// ---------------- tab: credits ----------------
+	b.WriteString(`<div id="tab-credits" class="panel">`)
+	b.WriteString(`<div class="card"><h2>自动刷新积分</h2>`)
+	b.WriteString(`<div class="row tight"><label class="field"><input type="checkbox" id="qEnabled"`)
+	if settings.Quota.Enabled {
+		b.WriteString(` checked`)
+	}
+	b.WriteString(`> 启用定时刷新积分</label></div>`)
+	b.WriteString(`<div class="row tight"><label class="field">每 <input type="number" id="qInterval" min="5" max="1440" value="` +
+		fmt.Sprint(clampIntervalMinutes(settings.Quota.IntervalMinutes)) + `"> 分钟刷新一次</label></div>`)
+	b.WriteString(`<div class="row tight"><label class="field"><input type="checkbox" id="qOnStart"`)
+	if settings.Quota.RefreshOnStart {
+		b.WriteString(` checked`)
+	}
+	b.WriteString(`> 启动时刷新一次</label></div>`)
+	b.WriteString(`<div class="row"><button type="button" onclick="saveQuotaSettings()">保存</button>`)
+	b.WriteString(`<button type="button" class="ghost" onclick="refreshQuota()">立即刷新积分</button></div>`)
+	b.WriteString(`<div class="note">积分决定账号选用顺序：源应用按剩余积分从多到少选用。</div>`)
+	b.WriteString(`</div>`)
+
+	b.WriteString(`<div class="card"><h2>账号积分</h2>`)
+	state.quota.mu.Lock()
+	lastRun := append([]quotaRefreshResult(nil), state.quota.lastRun...)
+	state.quota.mu.Unlock()
+	if len(lastRun) == 0 {
+		b.WriteString(`<div class="empty">点「立即刷新积分」查询各账号的剩余积分与到期时间。</div>`)
+	} else {
+		b.WriteString(renderQuotaResults(lastRun))
+	}
+	b.WriteString(`</div></div>`)
+
+	// ---------------- tab: usage ----------------
+	b.WriteString(`<div id="tab-usage" class="panel">`)
+	b.WriteString(`<div class="grid stats">`)
+	stat("总调用", totals.TotalCalls)
+	stat("今日", totals.TodayCalls)
+	stat("失败", totals.TotalFailed)
+	stat("输入 Tokens", totals.TotalPrompt)
+	stat("输出 Tokens", totals.TotalCompletion)
+	b.WriteString(`</div>`)
+	b.WriteString(`<div class="card"><h2>最近调用</h2>`)
+	if len(recentCalls) == 0 {
+		b.WriteString(`<div class="empty">暂无调用记录。</div>`)
+	} else {
+		b.WriteString(`<table><thead><tr><th>时间</th><th>供应商</th><th>模型</th><th class="num">状态</th><th class="num">Tokens</th></tr></thead><tbody>`)
+		for _, rec := range recentCalls {
+			cls := "ok"
+			if rec.StatusCode >= 400 || rec.Error != "" {
+				cls = "bad"
+			}
+			b.WriteString(`<tr><td class="mono">` + rec.StartedAt.Local().Format("15:04:05") + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(rec.ProviderID) + `</td>`)
+			b.WriteString(`<td><code>` + html.EscapeString(rec.Model) + `</code></td>`)
+			b.WriteString(`<td class="num ` + cls + `">` + fmt.Sprint(rec.StatusCode) + `</td>`)
+			b.WriteString(`<td class="num">` + fmt.Sprint(rec.PromptTokens) + " / " + fmt.Sprint(rec.CompletionTokens) + `</td></tr>`)
+		}
+		b.WriteString(`</tbody></table>`)
+	}
+	b.WriteString(`</div></div>`)
+
+	// ---------------- tab: settings ----------------
+	b.WriteString(`<div id="tab-settings" class="panel">`)
+	b.WriteString(`<div class="card"><h2>管理密钥 <span class="hint">仅保存在本机浏览器</span></h2>`)
+	b.WriteString(`<div class="row"><input type="password" id="mgmtKey" placeholder="CPA management key" style="flex:1 1 320px">`)
+	b.WriteString(`<button type="button" onclick="saveKey()">保存到浏览器</button>`)
+	b.WriteString(`<button type="button" class="ghost" onclick="clearKey()">清除</button></div>`)
+	b.WriteString(`<div class="muted small" id="keyState"></div>`)
+	b.WriteString(`<div class="note">密钥仅保存在本机浏览器（localStorage），不会上传到插件或服务器。</div>`)
+	b.WriteString(`</div>`)
+
+	b.WriteString(`<div class="card"><h2>网关设置</h2><table>`)
+	row := func(k string, v any) {
+		b.WriteString(`<tr><td><code>` + html.EscapeString(k) + `</code></td><td>` +
+			html.EscapeString(fmt.Sprint(v)) + `</td></tr>`)
+	}
+	row("default_provider", settings.DefaultProvider)
+	row("default_model", settings.DefaultModel)
+	row("enforce_frontend_key", settings.EnforceFrontendKey)
+	row("allow_no_key", settings.AllowNoKey)
+	row("api_key", settings.marshalForLog()["api_key"])
+	row("max_rotate", settings.MaxRotate)
+	row("error_threshold", settings.ErrorThreshold)
+	row("端口 port", settings.Port)
+	b.WriteString(`</table><div class="note">客户端鉴权由 CPA 的 <code>api-keys</code> 负责；` +
+		`本插件默认不重复校验，避免覆盖你已有的 CPA 密钥。</div></div>`)
+	b.WriteString(`</div>`)
+
+	b.WriteString(`</div>` + mainPageScript() + `</body></html>`)
+	return b.String()
+}
 
 // handleMainRequest serves the combined page and its JSON endpoints.
 func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, bool) {
@@ -35,11 +328,10 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 		return managementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    htmlResponseHeaders(),
-			Body:       []byte(mainPage()),
+			Body:       []byte(renderMainPage()),
 		}, true
 
 	case "/accounts":
-		// JSON account list, used by the page to refresh in place.
 		accounts := listWorkBuddyAccounts()
 		total, usable, known, credits := accountSummary(accounts)
 		return managementResponse{
@@ -109,8 +401,7 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 			}, true
 
 		case "/run":
-			// Combined action: check in, then refresh quota. One button to do
-			// both, which is the common intent.
+			// Combined action: check in, then refresh credits.
 			run := runFromManagement()
 			results, errQuota := runQuotaRefresh("manual")
 			refreshAccountsAfterLogin()
@@ -129,307 +420,4 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 	}
 
 	return managementResponse{}, false
-}
-
-// ---- HTML ----------------------------------------------------------------
-
-// mainPage renders the combined view.
-func mainPage() string {
-	settings := state.settings.get()
-	accounts := listWorkBuddyAccounts()
-	total, usable, known, credits := accountSummary(accounts)
-	totals := state.log.totals()
-
-	state.quota.mu.Lock()
-	quotaRunning := state.quota.running
-	state.quota.mu.Unlock()
-	state.checkin.mu.Lock()
-	checkinRunning := state.checkin.running
-	state.checkin.mu.Unlock()
-
-	checkinHistory := state.checkin.snapshot(5)
-	recentCalls := state.log.recent(10)
-
-	var b strings.Builder
-	b.WriteString(mainPageHead())
-
-	// --- key ----------------------------------------------------------
-	b.WriteString(`<section id="sec-key"><h2>管理密钥</h2><div class="card">`)
-	b.WriteString(`<div class="row"><input type="password" id="mgmtKey" placeholder="CPA management key" ` +
-		`style="width:min(420px,70%)"> ` +
-		`<button type="button" onclick="saveKey()">保存到浏览器</button> ` +
-		`<button type="button" onclick="clearKey()">清除</button></div>`)
-	b.WriteString(`<div class="muted" id="keyState"></div>`)
-	b.WriteString(`<div class="muted">密钥仅保存在本机浏览器（localStorage），不会上传到插件或服务器。</div>`)
-	b.WriteString(`</div></section>`)
-
-	// --- accounts -----------------------------------------------------
-	// Rendered server-side from the auth store so the list is populated on
-	// first load, right after a login.
-	b.WriteString(`<section id="sec-accounts"><h2>WorkBuddy 账号</h2>`)
-	b.WriteString(`<div class="cards">`)
-	writeCard := func(label string, value any) {
-		b.WriteString(`<div class="card"><b>` + html.EscapeString(fmt.Sprint(value)) + `</b>` +
-			html.EscapeString(label) + `</div>`)
-	}
-	writeCard("账号总数", total)
-	writeCard("可用", usable)
-	creditsText := "—"
-	if known > 0 {
-		creditsText = fmt.Sprint(credits)
-	}
-	writeCard("已知积分合计", creditsText)
-	writeCard("已查询积分", fmt.Sprintf("%d / %d", known, total))
-	// Urgent accounts get their own card so the number is impossible to miss.
-	urgent := 0
-	for _, a := range accounts {
-		if a.CreditsExpiringSoon || a.CreditsExpired {
-			urgent++
-		}
-	}
-	if urgent > 0 {
-		writeCard("积分即将/已过期", urgent)
-	}
-	b.WriteString(`</div>`)
-
-	b.WriteString(`<div class="card"><div class="muted">账号列表读取自 CPA 认证存储，登录后立即可见，无需先发起请求。` +
-		`仅显示 WorkBuddy / CodeBuddy 账号。积分 7 天内到期会高亮标注，建议优先使用。</div>`)
-	if len(accounts) == 0 {
-		b.WriteString(`<p class="muted">还没有 WorkBuddy 账号。请到 CPA 的「认证」页登录。</p>`)
-	} else {
-		b.WriteString(`<table><tr><th>账号</th><th>UID</th><th>版本</th><th>剩余积分</th><th>到期</th><th>状态</th></tr>`)
-		for _, a := range accounts {
-			status, class := "可用", "ok"
-			reason := ""
-			switch {
-			case a.Disabled:
-				status, class = "已停用", "bad"
-				reason = a.Reason
-			case a.Expired:
-				status, class = "凭据已过期", "bad"
-				reason = "请重新登录"
-			case !a.CooldownUntil.IsZero() && time.Now().Before(a.CooldownUntil):
-				status, class = "冷却中", "warn"
-				reason = fmt.Sprintf("%s（至 %s）", a.Reason, a.CooldownUntil.Local().Format("15:04:05"))
-			case a.Reason != "" && !a.Usable:
-				status, class = "不可用", "bad"
-				reason = a.Reason
-			}
-			cv := "—"
-			if a.CreditsKnown {
-				cv = fmt.Sprint(a.Credits)
-			}
-			// Expiry column: highlight 7-day urgency and mark expired credits.
-			expiry, expiryClass := "—", "muted"
-			switch {
-			case a.CreditsExpired:
-				expiry, expiryClass = "已过期", "bad"
-			case a.CreditsExpireAt > 0 && a.CreditsExpiringSoon:
-				expiry, expiryClass = fmt.Sprintf("%d 天后 ⚠️", a.CreditsExpireDays), "warn"
-			case a.CreditsExpireAt > 0:
-				expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "ok"
-			}
-			b.WriteString(`<tr><td>` + html.EscapeString(a.Label) + `</td>`)
-			b.WriteString(`<td><code>` + html.EscapeString(firstNonEmpty(a.UID, a.AuthIndex)) + `</code></td>`)
-			b.WriteString(`<td>` + html.EscapeString(a.Variant) + `</td>`)
-			b.WriteString(`<td>` + html.EscapeString(cv) + `</td>`)
-			b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
-			b.WriteString(`<td class="` + class + `">` + status)
-			if reason != "" {
-				b.WriteString(` <span class="muted">` + html.EscapeString(reason) + `</span>`)
-			}
-			b.WriteString(`</td></tr>`)
-		}
-		b.WriteString(`</table>`)
-	}
-	if warn := state.accounts.lastError(); warn != "" {
-		b.WriteString(`<div class="bad">读取账号列表失败：` + html.EscapeString(warn) + `</div>`)
-	}
-	b.WriteString(`</div>`)
-	b.WriteString(`<div class="card"><button type="button" id="btnRun" onclick="runAll()"`)
-	if quotaRunning || checkinRunning {
-		b.WriteString(` disabled`)
-	}
-	b.WriteString(`>一键：签到 + 刷新额度</button> <span class="muted" id="runMsg"></span></div>`)
-	b.WriteString(`<div id="runResult"></div></section>`)
-
-	// --- check-in schedule --------------------------------------------
-	b.WriteString(`<section id="sec-checkin"><h2>签到设置</h2><div class="card">`)
-	b.WriteString(`<label class="row"><input type="checkbox" id="ckEnabled"`)
-	if settings.Checkin.Enabled {
-		b.WriteString(` checked`)
-	}
-	b.WriteString(`> 启用每日自动签到</label>`)
-	b.WriteString(`<div class="row">每天 <input type="number" id="ckHour" min="0" max="23" value="` +
-		fmt.Sprint(clampHour(settings.Checkin.Hour)) + `" style="width:4em"> 时 ` +
-		`<input type="number" id="ckMinute" min="0" max="59" value="` +
-		fmt.Sprint(clampMinute(settings.Checkin.Minute)) + `" style="width:4em"> 分执行</div>`)
-	b.WriteString(`<label class="row"><input type="checkbox" id="ckOnStart"`)
-	if settings.Checkin.OnStart {
-		b.WriteString(` checked`)
-	}
-	b.WriteString(`> 启动时补跑（当天尚未执行时）</label>`)
-	b.WriteString(`<button type="button" onclick="saveSettings()">保存</button>`)
-	b.WriteString(`</div>`)
-
-	if len(checkinHistory) > 0 {
-		b.WriteString(`<div class="card"><div class="muted">最近签到</div>`)
-		b.WriteString(renderRun(checkinHistory[0]))
-		b.WriteString(`</div>`)
-	}
-	b.WriteString(`</section>`)
-
-	// --- quota schedule ------------------------------------------------
-	b.WriteString(`<section id="sec-quota"><h2>额度刷新设置</h2><div class="card">`)
-	b.WriteString(`<label class="row"><input type="checkbox" id="qEnabled"`)
-	if settings.Quota.Enabled {
-		b.WriteString(` checked`)
-	}
-	b.WriteString(`> 启用定时刷新额度</label>`)
-	b.WriteString(`<div class="row">每 <input type="number" id="qInterval" min="5" max="1440" value="` +
-		fmt.Sprint(clampIntervalMinutes(settings.Quota.IntervalMinutes)) + `" style="width:5em"> 分钟刷新一次</div>`)
-	b.WriteString(`<label class="row"><input type="checkbox" id="qOnStart"`)
-	if settings.Quota.RefreshOnStart {
-		b.WriteString(` checked`)
-	}
-	b.WriteString(`> 启动时刷新一次</label>`)
-	b.WriteString(`<button type="button" onclick="saveSettings()">保存</button>`)
-	b.WriteString(`<div class="muted">额度决定账号选用顺序：源应用按剩余额度从多到少选用账号。</div>`)
-	b.WriteString(`</div></section>`)
-
-	// --- account switching strategy ------------------------------------
-	// This is the piece the panel was missing: choosing how requests are
-	// distributed across accounts.
-	routing := routingStatusJSON()
-	b.WriteString(`<section id="sec-routing"><h2>账号切换策略</h2><div class="card">`)
-	b.WriteString(`<div class="row">`)
-	options, _ := routing["options"].([]map[string]any)
-	current, _ := routing["strategy"].(string)
-	for _, opt := range options {
-		value, _ := opt["value"].(string)
-		label, _ := opt["label"].(string)
-		desc, _ := opt["description"].(string)
-		b.WriteString(`<label class="opt"><input type="radio" name="strategy" value="` +
-			html.EscapeString(value) + `"`)
-		if value == current {
-			b.WriteString(` checked`)
-		}
-		b.WriteString(`> <b>` + html.EscapeString(label) + `</b>` +
-			` <span class="muted">` + html.EscapeString(desc) + `</span></label>`)
-	}
-	b.WriteString(`</div>`)
-	b.WriteString(`<button type="button" onclick="saveStrategy()">应用策略</button> ` +
-		`<button type="button" onclick="resetRotation()">重置轮巡位置</button>` +
-		` <span class="muted" id="strategyMsg"></span>`)
-	b.WriteString(`<div class="muted" style="margin-top:6px">当前：<b>` +
-		html.EscapeString(fmt.Sprint(routing["strategy_label"])) + `</b> · ` +
-		html.EscapeString(nextRotationHint()) + `</div>`)
-	b.WriteString(`</div>`)
-
-	// Selection order preview.
-	if rows, okRows := routing["order"].([]map[string]any); okRows && len(rows) > 0 {
-		b.WriteString(`<div class="card"><div class="muted">选择顺序预览（按当前策略）</div>`)
-		b.WriteString(`<table><tr><th>#</th><th>账号</th><th>剩余积分</th><th>到期</th><th>已选中次数</th></tr>`)
-		for _, row := range rows {
-			cv := "—"
-			if known, _ := row["known"].(bool); known {
-				cv = fmt.Sprint(row["credits"])
-			}
-			expiry, expiryClass := "—", "muted"
-			switch {
-			case boolFromAny(row["expired"]):
-				expiry, expiryClass = "已过期", "bad"
-			case boolFromAny(row["expiring_soon"]):
-				expiry, expiryClass = fmt.Sprint(row["expire_days"])+" 天后 ⚠️", "warn"
-			case row["expire_days"] != nil && fmt.Sprint(row["expire_days"]) != "0":
-				expiry, expiryClass = fmt.Sprint(row["expire_days"])+" 天后", "ok"
-			}
-			b.WriteString(`<tr><td>` + fmt.Sprint(row["position"]) + `</td>`)
-			b.WriteString(`<td>` + html.EscapeString(fmt.Sprint(row["label"])) + `</td>`)
-			b.WriteString(`<td>` + html.EscapeString(cv) + `</td>`)
-			b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
-			b.WriteString(`<td>` + fmt.Sprint(row["picks"]) + `</td></tr>`)
-		}
-		b.WriteString(`</table></div>`)
-	} else {
-		b.WriteString(`<div class="card muted">暂无可用账号，无法预览顺序。</div>`)
-	}
-	b.WriteString(`</section>`)
-
-	// --- usage ---------------------------------------------------------
-	b.WriteString(`<section id="sec-usage"><h2>调用统计</h2><div class="cards">`)
-	writeCard("总调用", totals.TotalCalls)
-	writeCard("今日", totals.TodayCalls)
-	writeCard("失败", totals.TotalFailed)
-	writeCard("输入 Tokens", totals.TotalPrompt)
-	writeCard("输出 Tokens", totals.TotalCompletion)
-	b.WriteString(`</div>`)
-	if len(recentCalls) > 0 {
-		b.WriteString(`<div class="card"><div class="muted">最近调用</div>`)
-		b.WriteString(`<table><tr><th>时间</th><th>供应商</th><th>模型</th><th>状态</th><th>Tokens</th></tr>`)
-		for _, rec := range recentCalls {
-			class := "ok"
-			if rec.StatusCode >= 400 || rec.Error != "" {
-				class = "bad"
-			}
-			b.WriteString(`<tr><td>` + rec.StartedAt.Local().Format("15:04:05") + `</td>`)
-			b.WriteString(`<td>` + html.EscapeString(rec.ProviderID) + `</td>`)
-			b.WriteString(`<td><code>` + html.EscapeString(rec.Model) + `</code></td>`)
-			b.WriteString(`<td class="` + class + `">` + fmt.Sprint(rec.StatusCode) + `</td>`)
-			b.WriteString(`<td>` + fmt.Sprint(rec.PromptTokens) + " / " + fmt.Sprint(rec.CompletionTokens) + `</td></tr>`)
-		}
-		b.WriteString(`</table></div>`)
-	}
-	b.WriteString(`</section>`)
-
-	// --- gateway settings (read-only summary) --------------------------
-	b.WriteString(`<section id="sec-gateway"><h2>网关设置</h2><div class="card"><table>`)
-	row := func(k string, v any) {
-		b.WriteString(`<tr><td><code>` + html.EscapeString(k) + `</code></td><td>` +
-			html.EscapeString(fmt.Sprint(v)) + `</td></tr>`)
-	}
-	row("api_key", settings.marshalForLog()["api_key"])
-	row("allow_no_key", settings.AllowNoKey)
-	row("default_provider", settings.DefaultProvider)
-	row("default_model", settings.DefaultModel)
-	row("max_rotate", settings.MaxRotate)
-	row("error_threshold", settings.ErrorThreshold)
-	b.WriteString(`</table></div></section>`)
-
-	b.WriteString(mainPageScript())
-	return b.String()
-}
-
-func mainPageHead() string {
-	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">` +
-		`<meta name="viewport" content="width=device-width,initial-scale=1">` +
-		`<title>AIGW 反向代理</title><style>` +
-		`:root{color-scheme:light dark}` +
-		`body{font:14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;margin:0;padding:24px;max-width:1100px}` +
-		`h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:0 0 8px;opacity:.75}` +
-		`nav{position:sticky;top:0;background:Canvas;padding:10px 0;margin:8px 0 16px;border-bottom:1px solid rgba(128,128,128,.25);z-index:5}` +
-		`nav a{color:inherit;text-decoration:none;opacity:.7;margin-right:16px;font-size:13px}` +
-		`nav a:hover{opacity:1}` +
-		`table{border-collapse:collapse;width:100%;font-size:13px}` +
-		`th,td{text-align:left;padding:6px 10px;border-bottom:1px solid rgba(128,128,128,.25)}` +
-		`th{opacity:.6;font-weight:600}` +
-		`code{font-family:ui-monospace,Menlo,monospace;font-size:12px}` +
-		`.ok{color:#0a0}.bad{color:#c00}.warn{color:#b80}.muted{opacity:.6}` +
-		`section{margin-bottom:28px}` +
-		`.card{border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;margin-bottom:12px}` +
-		`.cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}` +
-		`.cards .card{min-width:130px;margin-bottom:0}` +
-		`.cards b{display:block;font-size:22px;line-height:1.2}` +
-		`.row{display:block;margin:6px 0}` +
-		`.opt{display:block;margin:8px 0;cursor:pointer}` +
-		`button{padding:6px 14px;border-radius:8px;border:1px solid rgba(128,128,128,.4);cursor:pointer}` +
-		`button:disabled{opacity:.5;cursor:default}` +
-		`input[type=number]{padding:3px 6px}` +
-		`input[type=password]{padding:5px 8px;font-family:ui-monospace,Menlo,monospace}` +
-		`</style></head><body>` +
-		`<h1>AI 聚合网关 · 反向代理</h1>` +
-		`<div class="muted">WorkBuddy 账号、签到、额度与调用统计集中在本页。</div>` +
-		`<nav><a href="#sec-accounts">账号</a><a href="#sec-routing">切换策略</a>` +
-		`<a href="#sec-checkin">签到</a><a href="#sec-quota">额度</a>` +
-		`<a href="#sec-usage">统计</a><a href="#sec-gateway">设置</a></nav>`
 }
