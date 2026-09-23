@@ -83,6 +83,7 @@ jobs:
             --repo "${{ github.server_url }}/${{ github.repository }}" \
             --tag "v${{ steps.ver.outputs.version }}" \
             --checksums release/checksums.txt \
+            --platforms linux/amd64 \
             --author TaiXu \
             --out registry.json
 
