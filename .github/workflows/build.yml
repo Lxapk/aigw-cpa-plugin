@@ -14,8 +14,7 @@ name: Build CPA plugin
 # 为什么要把 registry.json 提交回 main：
 #   plugins.store-sources 是对该 URL 做一次普通 HTTP GET，需要「固定的 raw 地址」。
 #   若只把 registry.json 放在 Release 附件里，raw 链接会随 tag 变化、且指向旧版本。
-#   因此这里在打 tag 后自动把最新 registry.json 提交回 main 分支，
-#   让 https://raw.githubusercontent.com/<owner>/<repo>/main/registry.json 恒定可用。
+#   因此这里在打 tag 后自动把最新 registry.json 提交回默认分支。
 
 on:
   push:
@@ -24,9 +23,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号（手动触发时使用，如 0.1.0）"
+        description: "版本号（手动触发时使用，如 0.8.0）"
         required: false
-        default: "0.1.0"
+        default: "0.8.0"
 
 permissions:
   contents: write
@@ -71,15 +70,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          go build -buildmode=c-shared -trimpath -o dist/${PLUGIN_ID}.so .
+          go build -buildmode=c-shared -trimpath -o dist/aigw-reverse-proxy.so .
 
           # dlopen 冒烟测试：真实加载刚编出的 .so 并跑完一遍 RPC 会话
           go build -o dist/smoke ./smoke
-          ./dist/smoke dist/${PLUGIN_ID}.so
+          ./dist/smoke dist/aigw-reverse-proxy.so
 
           # 架构 + ABI 符号自检
-          readelf -h dist/${PLUGIN_ID}.so | grep Machine
-          nm -D --defined-only dist/${PLUGIN_ID}.so | grep cliproxy_plugin_init
+          readelf -h dist/aigw-reverse-proxy.so | grep Machine
+          nm -D --defined-only dist/aigw-reverse-proxy.so | grep cliproxy_plugin_init
 
       - name: Upload raw .so
         uses: actions/upload-artifact@v4
@@ -102,10 +101,13 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             V="${GITHUB_REF#refs/tags/}"
             V="${V#v}"                      # 去掉 v 前缀
+            TAG="${GITHUB_REF#refs/tags/}"
           else
             V="${{ github.event.inputs.version }}"
+            TAG="v${V}"
           fi
           echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Download built .so files
         uses: actions/download-artifact@v4
@@ -120,8 +122,8 @@ jobs:
           python3 scripts/build_release.py \
             --id "${PLUGIN_ID}" \
             --version "${VERSION}" \
-            --arm64 "dist/${PLUGIN_ID}-linux-arm64/${PLUGIN_ID}.so" \
-            --amd64 "dist/${PLUGIN_ID}-linux-amd64/${PLUGIN_ID}.so" \
+            --arm64 "dist/aigw-reverse-proxy-linux-arm64/aigw-reverse-proxy.so" \
+            --amd64 "dist/aigw-reverse-proxy-linux-amd64/aigw-reverse-proxy.so" \
             --out release
 
           python3 scripts/gen_registry.py \
@@ -146,15 +148,47 @@ jobs:
             registry.json
           generate_release_notes: true
 
-      # 关键：把 registry.json 提交回 main，让 raw 链接恒定可用。
-      # 只在打 tag 时执行；提交信息带 [skip ci] 以免自触发。
+      # 自检：CPA 的 FetchReleaseByTag 解析 /releases/tags/<tag> 的内嵌 assets 字段。
+      # 该字段在 GitHub 侧偶尔会滞后甚至为空（实测本仓库曾出现 assets=0 而
+      # /releases/{id}/assets 正常的情况），一旦为空插件就会报
+      # "release asset ... not found"。这里发现问题就明确失败，避免发布出一个
+      # 装不上的版本。
+      - name: Verify release assets are visible to CPA
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ok=0
+          for attempt in 1 2 3 4 5 6; do
+            count=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+              --jq '.assets | length' 2>/dev/null || echo 0)
+            echo "attempt ${attempt}: /releases/tags/${TAG} reports ${count} asset(s)"
+            if [[ "${count}" -ge 3 ]]; then ok=1; break; fi
+            sleep 15
+          done
+          if [[ "${ok}" != "1" ]]; then
+            # Report the discrepancy so the cause is unambiguous.
+            id=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' || echo '')
+            if [[ -n "${id}" ]]; then
+              real=$(gh api "repos/${{ github.repository }}/releases/${id}/assets" --jq 'length' || echo 0)
+              echo "::error::release ${TAG} exposes ${real} asset(s) via /releases/{id}/assets but 0 via /releases/tags/${TAG}; CPA cannot install it"
+            else
+              echo "::error::release ${TAG} is not visible by tag at all"
+            fi
+            exit 1
+          fi
+          echo "release ${TAG} is visible to CPA with ${count} asset(s)"
+
+      # 关键：把 registry.json 提交回默认分支，让 raw 链接恒定可用。
       #
       # 这一步必须幂等且能容忍并发：
       #   * registry.json 是上一步刚生成的未跟踪文件，git diff 看不到它，
       #     所以必须先 git add 再判断 git diff --cached。
-      #   * 重发同名 tag 时 main 上可能已有同样内容 —— 此时跳过即可。
-      #   * 提交期间 main 可能被推进（例如上一次 CI 的提交），push 会被拒，
-      #     因此失败要重试：先 rebase/sync 再推。
+      #   * 重发同名 tag 时分支上可能已有同样内容 —— 此时跳过即可。
+      #   * 提交期间分支可能被推进（例如上一次 CI 的提交），push 会被拒，
+      #     因此失败要重试：先同步再推。
       - name: Commit registry.json back to default branch
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -166,7 +200,6 @@ jobs:
 
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
 
-          # The generated file must exist before we try to publish it.
           if [[ ! -f registry.json ]]; then
             echo "registry.json 未生成，跳过提交"
             exit 0
@@ -174,8 +207,6 @@ jobs:
 
           git fetch origin "${DEFAULT_BRANCH}"
           git checkout "${DEFAULT_BRANCH}"
-          # Sync with whatever landed while we were building. --ff-only keeps
-          # this linear; a non-fast-forward would mean someone force-pushed.
           git pull --ff-only origin "${DEFAULT_BRANCH}" || true
 
           git add -A registry.json
@@ -187,8 +218,6 @@ jobs:
 
           git commit -m "chore: update registry.json to v${VERSION} [skip ci]"
 
-          # Retry the push: another run may have advanced the branch between our
-          # fetch and our push, which makes a plain push non-fast-forward.
           for attempt in 1 2 3; do
             if git push origin "${DEFAULT_BRANCH}"; then
               echo "已提交 registry.json 到 ${DEFAULT_BRANCH}"
