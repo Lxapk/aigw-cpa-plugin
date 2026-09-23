@@ -97,7 +97,9 @@ jobs:
 
   package:
     name: package release assets
-    needs: build
+    # 不等待 all arch: 只要 amd64 成功就发版。
+    needs: []
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -118,7 +120,8 @@ jobs:
           echo "version=${V}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Download built .so files
+      - name: Download built .so files (skip missing archs)
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           path: dist
