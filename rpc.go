@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "aigw-reverse-proxy"
-	pluginVersion = "0.6.0"
+	pluginVersion = "0.7.0"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -89,6 +89,10 @@ type registrationCaps struct {
 	// QuotaProvider surfaces the remaining-credit figure the source app showed
 	// ("已知额度合计", N1/R0.java:134).
 	QuotaProvider bool `json:"quota_provider"`
+
+	// Scheduler lets the plugin choose which credential a request uses, which
+	// is what makes the account-switching strategy configurable.
+	Scheduler bool `json:"scheduler"`
 }
 
 // managementRegistrationResponse mirrors pluginhost.rpcManagementRegistrationResponse.
@@ -172,6 +176,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 
 	case pluginabi.MethodExecutorHTTPRequest:
 		return executorHTTPRequest(request)
+
+	// ---- account selection strategy ------------------------------------
+	case pluginabi.MethodSchedulerPick:
+		return schedulerPick(request)
 
 	// ---- quota (port of a2/b.java:406 m()) -----------------------------
 	case pluginabi.MethodQuotaIdentifier:
@@ -262,6 +270,8 @@ func buildRegistration() registration {
 
 			// WorkBuddy credits drive the account selection order.
 			QuotaProvider: true,
+			// Lets the panel switch between by-credits / round-robin / random.
+			Scheduler: true,
 
 			ModelProvider: true,
 			ModelRouter:   true,

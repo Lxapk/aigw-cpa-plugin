@@ -60,6 +60,7 @@ static void call_shutdown(cliproxy_plugin_api* api) {
 import "C"
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -610,7 +611,71 @@ func main() {
 	}
 	ok("accounts endpoint -> total=%d (only WorkBuddy entries)", accountsDoc.Total)
 
-	// --- 16. shutdown ---------------------------------------------------
+	// --- 16. account-switching strategy (Scheduler) ----------------------
+	var capsDoc3 struct {
+		Capabilities map[string]any `json:"capabilities"`
+	}
+	mustUnmarshal(regResp.Result, &capsDoc3)
+	if v, okCap := capsDoc3.Capabilities["scheduler"]; !okCap || v != true {
+		die("scheduler capability must be declared, got %v", capsDoc3.Capabilities["scheduler"])
+	}
+	ok("scheduler capability declared (account switching)")
+
+	// A foreign provider must be left to the host scheduler.
+	pickForeign := call(plugin, "scheduler.pick", json.RawMessage(`{"Provider":"anthropic","Candidates":[{"ID":"x","Provider":"anthropic","Status":"active"}]}`))
+	assertOK(pickForeign, "scheduler.pick(foreign)")
+	var pickForeignOut struct {
+		Handled bool `json:"Handled"`
+	}
+	mustUnmarshal(pickForeign.Result, &pickForeignOut)
+	if pickForeignOut.Handled {
+		die("scheduler must not handle another provider")
+	}
+	ok("scheduler.pick defers foreign providers")
+
+	// Our own provider with candidates must be handled.
+	pickOwn := call(plugin, "scheduler.pick", json.RawMessage(`{"Provider":"codebuddy","Candidates":[{"ID":"a","Provider":"codebuddy","Status":"active"},{"ID":"b","Provider":"codebuddy","Status":"active"}]}`))
+	assertOK(pickOwn, "scheduler.pick(own)")
+	var pickOwnOut struct {
+		Handled bool   `json:"Handled"`
+		AuthID  string `json:"AuthID"`
+	}
+	mustUnmarshal(pickOwn.Result, &pickOwnOut)
+	if !pickOwnOut.Handled || (pickOwnOut.AuthID != "a" && pickOwnOut.AuthID != "b") {
+		die("scheduler.pick(own) = %+v", pickOwnOut)
+	}
+	ok("scheduler.pick -> auth=%s (handled)", pickOwnOut.AuthID)
+
+	// The three strategies must be switchable from the management API.
+	for _, strategy := range []string{"round_robin", "random", "by_credits"} {
+		body, _ := json.Marshal(map[string]string{"strategy": strategy})
+		cfgResp := call(plugin, "management.handle", json.RawMessage(
+			`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"`+
+				base64Std(string(body))+`"}`))
+		assertOK(cfgResp, "management.handle(/routing/config "+strategy+")")
+	}
+	ok("routing strategy switchable: round_robin / random / by_credits")
+
+	routingResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/aigw-reverse-proxy/routing/status"}`))
+	assertOK(routingResp, "management.handle(/routing/status)")
+	var routingEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(routingResp.Result, &routingEnv)
+	var routingDoc struct {
+		Routing struct {
+			Strategy string           `json:"strategy"`
+			Options  []map[string]any `json:"options"`
+		} `json:"routing"`
+	}
+	mustUnmarshal(routingEnv.Body, &routingDoc)
+	if len(routingDoc.Routing.Options) != 3 {
+		die("expected 3 strategy options, got %d", len(routingDoc.Routing.Options))
+	}
+	ok("routing/status -> strategy=%s options=%d", routingDoc.Routing.Strategy, len(routingDoc.Routing.Options))
+
+	// --- 17. shutdown ---------------------------------------------------
 	C.call_shutdown(&plugin)
 	ok("cliproxy_plugin_shutdown returned cleanly")
 
@@ -675,6 +740,12 @@ func startErrCode(env envelope) string {
 		return "unknown"
 	}
 	return env.Error.Code
+}
+
+// base64Std encodes bytes for embedding in a JSON request body, matching how
+// Go marshals []byte.
+func base64Std(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
 func mustUnmarshal(raw json.RawMessage, out any) {

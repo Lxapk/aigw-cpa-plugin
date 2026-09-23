@@ -730,6 +730,119 @@ curl -s "$BASE/v0/management/aigw-reverse-proxy/accounts" \
 > 登录成功后会主动失效缓存，所以新账号立刻可见。
 > 宿主读取失败时**返回上一次的缓存**并把错误放进 `warning`，页面不会变空。
 
+## 2.10 账号切换策略（v0.7.0）
+
+### 三种策略，面板上一键切换
+
+管理面板的 **「账号切换策略」** 区块：
+
+| 策略 | 行为 |
+|---|---|
+| **按额度**（默认） | 优先使用**剩余额度最多**的账号 —— 源应用的行为（`A0/s.java:596`） |
+| **轮巡** | 按顺序轮流使用每个账号，请求分布最均匀 |
+| **随机** | 每次随机挑选，避免总是命中同一个账号 |
+
+选中后点「应用策略」立即生效，无需重启。另有「重置轮巡位置」把轮巡游标归零。
+
+### 实现原理：CPA 的 `Scheduler` 能力
+
+CPA 正常情况下**自己选账号**。插件通过注册 `Scheduler` 能力接管选号：
+
+```
+请求进来
+  ↓
+CPA 收集所有可用候选账号
+  ↓
+调用 scheduler.pick(候选列表, 请求上下文)
+  ↓
+插件按当前策略返回一个 AuthID
+  ↓
+CPA 用该账号执行请求
+```
+
+### 三种策略的算法
+
+```go
+// 按额度（A0/s.java:596 的移植）
+best = nil
+for c in candidates:
+    if best == nil || c.Credits > best.Credits: best = c    // 严格 >，同分保持顺序
+return best.ID
+
+// 轮巡（按 provider 独立游标）
+ids = sorted(candidate ids)
+pos = cursor[provider]; cursor[provider] = pos + 1
+return ids[pos % len(ids)]
+
+// 随机
+return candidates[rng.Intn(len(candidates))].ID
+```
+
+### 统一的可用性过滤
+
+三种策略共用同一套筛选，对应 `A0/s.java:596` 的守卫：
+
+```
+✓ host 报告的状态不是 disabled / unavailable / failed / invalid / error / expired
+✓ host 元数据里没有 disabled: true
+✓ 插件凭据池里不在冷却窗口内
+✓ 本次请求尚未尝试过（读取 tried_auth_ids）
+```
+
+**候选为空时插件返回 `Handled: false`**，把决定权交回 CPA 内置调度器，
+不会让请求失败。
+
+### 只接管自己的账号
+
+```go
+if provider 是 codebuddy/WorkBuddy       → 接管
+if provider 列表里有 codebuddy           → 接管
+if 明确指定了别的 provider                → 不接管（交给对应供应商）
+if provider 信息为空，但候选都是我们的     → 接管
+```
+
+其他供应商的请求**完全不干预**。
+
+### 配置
+
+```yaml
+plugins:
+  configs:
+    aigw-reverse-proxy:
+      routing:
+        strategy: by_credits    # by_credits | round_robin | random
+```
+
+也接受中文/别名：`按额度` / `额度` / `credits`、`轮巡` / `rr`、`随机` / `rand`。
+
+### HTTP 接口
+
+```bash
+KEY="你的 management key"; P=aigw-reverse-proxy; BASE="http://127.0.0.1:8317"
+
+# 查看当前策略与选择顺序预览
+curl -s "$BASE/v0/management/$P/routing/status" -H "Authorization: Bearer $KEY"
+
+# 切换策略
+curl -s -X POST "$BASE/v0/management/$P/routing/config" \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"strategy":"round_robin"}'
+
+# 重置轮巡位置
+curl -s -X POST "$BASE/v0/management/$P/reset" -H "Authorization: Bearer $KEY"
+```
+
+### 面板上的「选择顺序预览」
+
+按当前策略展示**实际会被选用的顺序**，并显示每个账号**已被选中多少次**，
+方便验证策略是否按预期工作：
+
+| # | 账号 | 剩余额度 | 已选中次数 |
+|---|---|---|---|
+| 1 | acct-a@example.com | 900 | 42 |
+| 2 | acct-b@example.com | 500 | 40 |
+| 3 | acct-c@example.com | 120 | 41 |
+
 ---
 
 ## 3. 获取与构建

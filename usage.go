@@ -139,21 +139,23 @@ func (u usagePayload) normalized() (prompt, completion, total int64) {
 
 // globalState is the plugin-wide singleton set, populated on register.
 type globalState struct {
-	settings *settingsStore
-	pool     *credentialPool
-	log      *callLog
-	checkin  *checkinState
-	quota    *quotaState
-	accounts *accountStore
+	settings  *settingsStore
+	pool      *credentialPool
+	log       *callLog
+	checkin   *checkinState
+	quota     *quotaState
+	accounts  *accountStore
+	scheduler *schedulerState
 }
 
 var state = &globalState{
-	settings: newSettingsStore(),
-	pool:     newCredentialPool(),
-	log:      newCallLog(100),
-	checkin:  newCheckinState(),
-	quota:    newQuotaState(),
-	accounts: newAccountStore(),
+	settings:  newSettingsStore(),
+	pool:      newCredentialPool(),
+	log:       newCallLog(100),
+	checkin:   newCheckinState(),
+	quota:     newQuotaState(),
+	accounts:  newAccountStore(),
+	scheduler: newSchedulerState(),
 }
 
 func shutdownPlugin() {

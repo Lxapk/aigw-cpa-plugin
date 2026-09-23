@@ -77,6 +77,8 @@ type gatewaySettings struct {
 	Checkin checkinSettings `json:"checkin" yaml:"checkin"`
 	// Quota holds the quota-refresh configuration (nested under "quota").
 	Quota quotaSettings `json:"quota" yaml:"quota"`
+	// Routing holds the account-selection strategy (nested under "routing").
+	Routing routingSettings `json:"routing" yaml:"routing"`
 }
 
 // defaultGatewaySettings returns the exact defaults of V1.s's synthetic
@@ -98,6 +100,7 @@ func defaultGatewaySettings() gatewaySettings {
 		DefaultProvider:     "trae",
 		Checkin:             defaultCheckinSettings(),
 		Quota:               defaultQuotaSettings(),
+		Routing:             defaultRoutingSettings(),
 	}
 }
 
@@ -141,6 +144,8 @@ func (g *gatewaySettings) applyDefaults() {
 	g.Checkin.applyDefaults()
 	// Same reasoning for the quota block.
 	g.Quota.applyDefaults()
+	// And the routing block.
+	g.Routing.applyDefaults()
 }
 
 // applyDefaults fills the check-in block with sensible values when it was not
@@ -205,6 +210,13 @@ func (s *settingsStore) setQuota(cfg quotaSettings) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.val.Quota = cfg
+}
+
+// setRouting replaces only the routing block, leaving gateway settings intact.
+func (s *settingsStore) setRouting(cfg routingSettings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.val.Routing = cfg
 }
 
 // lifecycleRequest is the payload CPA sends for plugin.register /

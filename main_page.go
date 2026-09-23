@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/http"
@@ -54,10 +55,59 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 				"warning":       state.accounts.lastError(),
 			}),
 		}, true
+
+	case "/routing/status":
+		return managementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    jsonResponseHeaders(),
+			Body: mustJSON(map[string]any{
+				"routing":   routingStatusJSON(),
+				"scheduler": schedulerSnapshot(),
+			}),
+		}, true
 	}
 
 	if method == http.MethodPost {
 		switch path {
+		case "/routing/config":
+			var body struct {
+				Strategy string `json:"strategy"`
+				Routing  *struct {
+					Strategy string `json:"strategy"`
+				} `json:"routing"`
+			}
+			if len(req.Body) > 0 {
+				if errUnmarshal := json.Unmarshal(req.Body, &body); errUnmarshal != nil {
+					return managementResponse{
+						StatusCode: http.StatusBadRequest,
+						Headers:    jsonResponseHeaders(),
+						Body:       mustJSON(map[string]any{"error": errUnmarshal.Error()}),
+					}, true
+				}
+			}
+			value := body.Strategy
+			if value == "" && body.Routing != nil {
+				value = body.Routing.Strategy
+			}
+			applied := applyRoutingConfig(routingSettings{Strategy: normalizeStrategy(value)})
+			return managementResponse{
+				StatusCode: http.StatusOK,
+				Headers:    jsonResponseHeaders(),
+				Body: mustJSON(map[string]any{
+					"ok":      true,
+					"routing": routingStatusJSON(),
+					"applied": string(applied.Strategy),
+				}),
+			}, true
+
+		case "/routing/reset":
+			state.scheduler.resetCursor()
+			return managementResponse{
+				StatusCode: http.StatusOK,
+				Headers:    jsonResponseHeaders(),
+				Body:       mustJSON(map[string]any{"ok": true, "routing": routingStatusJSON()}),
+			}, true
+
 		case "/run":
 			// Combined action: check in, then refresh quota. One button to do
 			// both, which is the common intent.
@@ -226,6 +276,55 @@ func mainPage() string {
 	b.WriteString(`<div class="muted">额度决定账号选用顺序：源应用按剩余额度从多到少选用账号。</div>`)
 	b.WriteString(`</div></section>`)
 
+	// --- account switching strategy ------------------------------------
+	// This is the piece the panel was missing: choosing how requests are
+	// distributed across accounts.
+	routing := routingStatusJSON()
+	b.WriteString(`<section id="sec-routing"><h2>账号切换策略</h2><div class="card">`)
+	b.WriteString(`<div class="row">`)
+	options, _ := routing["options"].([]map[string]any)
+	current, _ := routing["strategy"].(string)
+	for _, opt := range options {
+		value, _ := opt["value"].(string)
+		label, _ := opt["label"].(string)
+		desc, _ := opt["description"].(string)
+		b.WriteString(`<label class="opt"><input type="radio" name="strategy" value="` +
+			html.EscapeString(value) + `"`)
+		if value == current {
+			b.WriteString(` checked`)
+		}
+		b.WriteString(`> <b>` + html.EscapeString(label) + `</b>` +
+			` <span class="muted">` + html.EscapeString(desc) + `</span></label>`)
+	}
+	b.WriteString(`</div>`)
+	b.WriteString(`<button type="button" onclick="saveStrategy()">应用策略</button> ` +
+		`<button type="button" onclick="resetRotation()">重置轮巡位置</button>` +
+		` <span class="muted" id="strategyMsg"></span>`)
+	b.WriteString(`<div class="muted" style="margin-top:6px">当前：<b>` +
+		html.EscapeString(fmt.Sprint(routing["strategy_label"])) + `</b> · ` +
+		html.EscapeString(nextRotationHint()) + `</div>`)
+	b.WriteString(`</div>`)
+
+	// Selection order preview.
+	if rows, okRows := routing["order"].([]map[string]any); okRows && len(rows) > 0 {
+		b.WriteString(`<div class="card"><div class="muted">选择顺序预览（按当前策略）</div>`)
+		b.WriteString(`<table><tr><th>#</th><th>账号</th><th>剩余额度</th><th>已选中次数</th></tr>`)
+		for _, row := range rows {
+			cv := "—"
+			if known, _ := row["known"].(bool); known {
+				cv = fmt.Sprint(row["credits"])
+			}
+			b.WriteString(`<tr><td>` + fmt.Sprint(row["position"]) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(fmt.Sprint(row["label"])) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(cv) + `</td>`)
+			b.WriteString(`<td>` + fmt.Sprint(row["picks"]) + `</td></tr>`)
+		}
+		b.WriteString(`</table></div>`)
+	} else {
+		b.WriteString(`<div class="card muted">暂无可用账号，无法预览顺序。</div>`)
+	}
+	b.WriteString(`</section>`)
+
 	// --- usage ---------------------------------------------------------
 	b.WriteString(`<section id="sec-usage"><h2>调用统计</h2><div class="cards">`)
 	writeCard("总调用", totals.TotalCalls)
@@ -291,6 +390,7 @@ func mainPageHead() string {
 		`.cards .card{min-width:130px;margin-bottom:0}` +
 		`.cards b{display:block;font-size:22px;line-height:1.2}` +
 		`.row{display:block;margin:6px 0}` +
+		`.opt{display:block;margin:8px 0;cursor:pointer}` +
 		`button{padding:6px 14px;border-radius:8px;border:1px solid rgba(128,128,128,.4);cursor:pointer}` +
 		`button:disabled{opacity:.5;cursor:default}` +
 		`input[type=number]{padding:3px 6px}` +
@@ -298,7 +398,7 @@ func mainPageHead() string {
 		`</style></head><body>` +
 		`<h1>AI 聚合网关 · 反向代理</h1>` +
 		`<div class="muted">WorkBuddy 账号、签到、额度与调用统计集中在本页。</div>` +
-		`<nav><a href="#sec-accounts">账号</a><a href="#sec-checkin">签到</a>` +
-		`<a href="#sec-quota">额度</a><a href="#sec-usage">统计</a>` +
-		`<a href="#sec-gateway">设置</a></nav>`
+		`<nav><a href="#sec-accounts">账号</a><a href="#sec-routing">切换策略</a>` +
+		`<a href="#sec-checkin">签到</a><a href="#sec-quota">额度</a>` +
+		`<a href="#sec-usage">统计</a><a href="#sec-gateway">设置</a></nav>`
 }

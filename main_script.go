@@ -144,6 +144,34 @@ func mainPageScript() string {
     });
   };
 
+  // Account-switching strategy.
+  window.saveStrategy = function () {
+    var msg = document.getElementById('strategyMsg');
+    var picked = document.querySelector('input[name="strategy"]:checked');
+    if (!picked) { if (msg) { msg.textContent = '请选择一种策略'; msg.className = 'bad'; } return; }
+    if (msg) { msg.textContent = '应用中…'; msg.className = 'muted'; }
+    call('{{ROUTING_CONFIG}}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy: picked.value })
+    }).then(function () {
+      if (msg) { msg.textContent = '已应用：' + picked.value; msg.className = 'ok'; }
+      setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) {
+      if (msg) { msg.textContent = '应用失败：' + e.message; msg.className = 'bad'; }
+    });
+  };
+
+  window.resetRotation = function () {
+    var msg = document.getElementById('strategyMsg');
+    if (msg) { msg.textContent = '重置中…'; msg.className = 'muted'; }
+    call('{{ROTATION_RESET}}', { method: 'POST' }).then(function () {
+      if (msg) { msg.textContent = '轮巡位置已重置'; msg.className = 'ok'; }
+    }).catch(function (e) {
+      if (msg) { msg.textContent = '重置失败：' + e.message; msg.className = 'bad'; }
+    });
+  };
+
   window.saveSettings = function () {
     var msg = document.getElementById('runMsg');
     if (msg) { msg.textContent = '保存中…'; msg.className = 'muted'; }
@@ -190,5 +218,7 @@ func mainPageScript() string {
 		"{{RUN}}", managementBasePath()+"/"+pluginName+"/run",
 		"{{CK_CONFIG}}", managementBasePath()+"/"+pluginName+"/checkin/config",
 		"{{Q_CONFIG}}", managementBasePath()+"/"+pluginName+"/quota/config",
+		"{{ROUTING_CONFIG}}", managementBasePath()+"/"+pluginName+"/routing/config",
+		"{{ROTATION_RESET}}", managementBasePath()+"/"+pluginName+"/routing/reset",
 	).Replace(script)
 }
