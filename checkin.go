@@ -112,23 +112,8 @@ func collectCheckinAccounts() ([]checkinAccount, error) {
 		return nil, errList
 	}
 
-	// Accept either {"auths":[...]} or a bare array.
-	var entries []hostAuthEntry
-	if len(raw) > 0 {
-		var wrapper struct {
-			Auths []hostAuthEntry `json:"auths"`
-			Items []hostAuthEntry `json:"items"`
-		}
-		if errUnmarshal := json.Unmarshal(raw, &wrapper); errUnmarshal == nil {
-			entries = wrapper.Auths
-			if len(entries) == 0 {
-				entries = wrapper.Items
-			}
-		}
-		if len(entries) == 0 {
-			_ = json.Unmarshal(raw, &entries)
-		}
-	}
+	// Use the shared decoder: CPA nests the entries under "files".
+	entries := decodeAuthEntries(raw)
 
 	var out []checkinAccount
 	for _, entry := range entries {
@@ -161,29 +146,20 @@ func collectCheckinAccounts() ([]checkinAccount, error) {
 	return out, nil
 }
 
-// hostAuthEntry mirrors the subset of host.auth.list / host.auth.get we need.
-type hostAuthEntry struct {
-	AuthIndex   string          `json:"auth_index"`
-	AuthID      string          `json:"id"`
-	Provider    string          `json:"provider"`
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Label       string          `json:"label"`
-	Disabled    bool            `json:"disabled"`
-	StorageJSON json.RawMessage `json:"storage_json"`
-}
-
 // fetchAuthStorage asks the host for one credential's stored JSON.
+//
+// The response nests the body under "json" (rpcHostAuthGetResponse); reading a
+// wrong key here leaves StorageJSON nil and the credential looks unparsable.
 func fetchAuthStorage(authIndex string) json.RawMessage {
 	raw, errGet := callHost("host.auth.get", map[string]any{"auth_index": authIndex})
 	if errGet != nil || len(raw) == 0 {
 		return nil
 	}
-	var entry hostAuthEntry
-	if errUnmarshal := json.Unmarshal(raw, &entry); errUnmarshal != nil {
+	var resp hostAuthGetResponse
+	if errUnmarshal := json.Unmarshal(raw, &resp); errUnmarshal != nil {
 		return nil
 	}
-	return entry.StorageJSON
+	return resp.credentialJSON()
 }
 
 // ---- running -------------------------------------------------------------

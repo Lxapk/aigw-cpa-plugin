@@ -213,19 +213,22 @@ func isWorkBuddyAuthEntry(entry hostAuthEntry) bool {
 }
 
 // decodeAuthEntries tolerates the shapes host.auth.list may return.
+//
+// CPA nests the entries under "files" (rpcHostAuthListResponse); the other keys
+// are fallbacks for hosts that spell it differently. A bare array is also
+// accepted.
 func decodeAuthEntries(raw json.RawMessage) []hostAuthEntry {
 	if len(raw) == 0 {
 		return nil
 	}
-	var wrapper struct {
-		Auths []hostAuthEntry `json:"auths"`
-		Items []hostAuthEntry `json:"items"`
-	}
+	var wrapper hostAuthListResponse
 	if errUnmarshal := json.Unmarshal(raw, &wrapper); errUnmarshal == nil {
-		if len(wrapper.Auths) > 0 {
+		switch {
+		case len(wrapper.Files) > 0:
+			return wrapper.Files
+		case len(wrapper.Auths) > 0:
 			return wrapper.Auths
-		}
-		if len(wrapper.Items) > 0 {
+		case len(wrapper.Items) > 0:
 			return wrapper.Items
 		}
 	}
