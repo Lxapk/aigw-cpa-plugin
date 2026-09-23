@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "aigw-reverse-proxy"
-	pluginVersion = "0.4.2"
+	pluginVersion = "0.5.0"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -85,6 +85,10 @@ type registrationCaps struct {
 	ExecutorModelScope    string   `json:"executor_model_scope"`
 	ExecutorInputFormats  []string `json:"executor_input_formats"`
 	ExecutorOutputFormats []string `json:"executor_output_formats"`
+
+	// QuotaProvider surfaces the remaining-credit figure the source app showed
+	// ("已知额度合计", N1/R0.java:134).
+	QuotaProvider bool `json:"quota_provider"`
 }
 
 // managementRegistrationResponse mirrors pluginhost.rpcManagementRegistrationResponse.
@@ -108,10 +112,13 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		if errDecode := state.settings.decodeLifecycleConfig(req.ConfigYAML); errDecode != nil {
 			return nil, errDecode
 		}
-		// Bring up the check-in scheduler so the configured schedule is honoured
-		// for the lifetime of this plugin instance.
+		// Bring up the background schedulers so the configured cadences are
+		// honoured for the lifetime of this plugin instance.
 		if state.settings.get().Checkin.Enabled {
 			startCheckinScheduler()
+		}
+		if state.settings.get().Quota.Enabled {
+			startQuotaScheduler()
 		}
 		return okEnvelope(buildRegistration())
 
@@ -165,6 +172,19 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 
 	case pluginabi.MethodExecutorHTTPRequest:
 		return executorHTTPRequest(request)
+
+	// ---- quota (port of a2/b.java:406 m()) -----------------------------
+	case pluginabi.MethodQuotaIdentifier:
+		return quotaIdentifier()
+
+	case pluginabi.MethodQuotaDescribe:
+		return quotaDescribe()
+
+	case pluginabi.MethodQuotaFetch:
+		return quotaFetch(request)
+
+	case pluginabi.MethodQuotaReset:
+		return quotaReset()
 
 	// ---- frontend auth (port of V1/o.j) -------------------------------
 	case pluginabi.MethodFrontendAuthIdentifier:
@@ -239,6 +259,9 @@ func buildRegistration() registration {
 			StreamChunkInterceptor:        true,
 			UsagePlugin:                   true,
 			ManagementAPI:                 true,
+
+			// WorkBuddy credits drive the account selection order.
+			QuotaProvider: true,
 
 			ModelProvider: true,
 			ModelRouter:   true,

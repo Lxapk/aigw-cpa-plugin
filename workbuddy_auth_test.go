@@ -51,7 +51,11 @@ func TestRegistrationDeclaresAuthProvider(t *testing.T) {
 
 func TestWorkBuddyBaseURLMatchesSource(t *testing.T) {
 	// a2/b.q(): global -> workbuddy.ai, otherwise copilot.tencent.com
-	if got := workBuddyBaseURL("global"); got != "https://www.workbuddy.ai" {
+	// The region comes from the credential's domain (a2/b.java:284).
+	orig := workBuddyGlobalBase()
+	setWorkBuddyGlobalBase("https://www.workbuddy.ai")
+	defer setWorkBuddyGlobalBase(orig)
+	if got := workBuddyBaseURL("www.workbuddy.ai"); got != "https://www.workbuddy.ai" {
 		t.Errorf("global base = %q", got)
 	}
 	if got := workBuddyBaseURL("cn"); got != "https://copilot.tencent.com" {
@@ -64,7 +68,7 @@ func TestWorkBuddyBaseURLMatchesSource(t *testing.T) {
 
 func TestWorkBuddyOriginURLMatchesSource(t *testing.T) {
 	// a2/b.p(): global -> workbuddy.ai, otherwise codebuddy.cn
-	if got := workBuddyOriginURL("global"); got != "https://www.workbuddy.ai" {
+	if got := workBuddyOriginURL("www.workbuddy.ai"); got != "https://www.workbuddy.ai" {
 		t.Errorf("global origin = %q", got)
 	}
 	if got := workBuddyOriginURL("cn"); got != "https://www.codebuddy.cn" {
@@ -148,9 +152,9 @@ func TestParseWorkBuddyCredentialsBackfillsFromJWT(t *testing.T) {
 	// a2/b.t(): when uid/enterpriseId are absent they are recovered from the
 	// access token's JWT claims.
 	token := makeJWT(t, map[string]any{
-		"user_id":     "jwt-user",
-		"tenant_id":   "jwt-tenant",
-		"nickname":    "ignored",
+		"user_id":   "jwt-user",
+		"tenant_id": "jwt-tenant",
+		"nickname":  "ignored",
 	})
 	raw, _ := json.Marshal(map[string]any{"accessToken": token})
 	creds, err := parseWorkBuddyCredentials(raw)
@@ -285,11 +289,83 @@ func TestApplyWorkBuddyHeadersMatchesSource(t *testing.T) {
 }
 
 func TestApplyWorkBuddyHeadersGlobalOrigin(t *testing.T) {
-	creds := &workBuddyCredentials{AccessToken: "tok", Domain: "global"}
+	// The region is decided by the credential's domain suffix (a2/b.java:284),
+	// not by a magic "global" string.
+	creds := &workBuddyCredentials{AccessToken: "tok", Domain: "www.workbuddy.ai"}
 	h := http.Header{}
 	applyWorkBuddyHeaders(h, creds)
 	if got := h.Get("Origin"); got != "https://www.workbuddy.ai" {
 		t.Fatalf("global origin = %q", got)
+	}
+}
+
+// TestIsWorkBuddyGlobalDomainMatchesSource ports a2/b.java:284 D().
+func TestIsWorkBuddyGlobalDomainMatchesSource(t *testing.T) {
+	cases := map[string]bool{
+		"workbuddy.ai":     true,
+		"www.workbuddy.ai": true,
+		"WWW.WorkBuddy.AI": true,
+		"  workbuddy.ai  ": true,
+		"api.workbuddy.ai": true,
+		// Anything else non-empty is cn.
+		"codebuddy.cn":      false,
+		"www.codebuddy.cn":  false,
+		"cn":                false,
+		"workbuddy.ai.evil": false, // suffix must be the real domain
+		"notworkbuddy.ai":   false,
+		"":                  false,
+	}
+	for in, want := range cases {
+		if got := isWorkBuddyGlobalDomain(in); got != want {
+			t.Errorf("isWorkBuddyGlobalDomain(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestGlobalDomainSelectsAllBases ties the domain rule to every endpoint base.
+func TestGlobalDomainSelectsAllBases(t *testing.T) {
+	origGlobal := workBuddyGlobalBase()
+	origCheckin := checkinBaseForTest()
+	origCopilot := copilotHostValue()
+	setWorkBuddyGlobalBase("https://GLOBAL")
+	setCheckinBase("https://CN-CHECKIN")
+	setCopilotHost("https://CN-CHAT")
+	defer func() {
+		setWorkBuddyGlobalBase(origGlobal)
+		setCheckinBase(origCheckin)
+		setCopilotHost(origCopilot)
+	}()
+
+	global := "www.workbuddy.ai"
+	cn := "codebuddy.cn"
+
+	// Chat / models base (a2/b.java:717 q()).
+	if got := workBuddyBaseURL(global); got != "https://GLOBAL" {
+		t.Errorf("global chat base = %q", got)
+	}
+	if got := workBuddyBaseURL(cn); got != "https://CN-CHAT" {
+		t.Errorf("cn chat base = %q", got)
+	}
+	// Quota base (a2/b.java:406).
+	if got := workBuddyQuotaBase(global); got != "https://GLOBAL" {
+		t.Errorf("global quota base = %q", got)
+	}
+	if got := workBuddyQuotaBase(cn); got != "https://CN-CHECKIN" {
+		t.Errorf("cn quota base = %q", got)
+	}
+	// Check-in base (smali a2/b.smali:2660).
+	if got := workBuddyCheckinBase(global); got != "https://GLOBAL" {
+		t.Errorf("global checkin base = %q", got)
+	}
+	if got := workBuddyCheckinBase(cn); got != "https://CN-CHECKIN" {
+		t.Errorf("cn checkin base = %q", got)
+	}
+	// Origin/Referer (a2/b.java:696).
+	if got := workBuddyOriginURL(global); got != "https://www.workbuddy.ai" {
+		t.Errorf("global origin = %q", got)
+	}
+	if got := workBuddyOriginURL(cn); got != "https://www.codebuddy.cn" {
+		t.Errorf("cn origin = %q", got)
 	}
 }
 

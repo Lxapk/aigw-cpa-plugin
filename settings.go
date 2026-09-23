@@ -75,6 +75,8 @@ type gatewaySettings struct {
 	Debug bool `json:"debug" yaml:"debug"`
 	// Checkin holds the daily check-in configuration (nested under "checkin").
 	Checkin checkinSettings `json:"checkin" yaml:"checkin"`
+	// Quota holds the quota-refresh configuration (nested under "quota").
+	Quota quotaSettings `json:"quota" yaml:"quota"`
 }
 
 // defaultGatewaySettings returns the exact defaults of V1.s's synthetic
@@ -95,6 +97,7 @@ func defaultGatewaySettings() gatewaySettings {
 		LogRetentionDays:    30,
 		DefaultProvider:     "trae",
 		Checkin:             defaultCheckinSettings(),
+		Quota:               defaultQuotaSettings(),
 	}
 }
 
@@ -136,6 +139,8 @@ func (g *gatewaySettings) applyDefaults() {
 	// the zero value when the section is absent. Restore the defaults in that
 	// case so an empty config does not silently schedule 00:00.
 	g.Checkin.applyDefaults()
+	// Same reasoning for the quota block.
+	g.Quota.applyDefaults()
 }
 
 // applyDefaults fills the check-in block with sensible values when it was not
@@ -193,6 +198,13 @@ func (s *settingsStore) setCheckin(cfg checkinSettings) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.val.Checkin = cfg
+}
+
+// setQuota replaces only the quota block, leaving gateway settings intact.
+func (s *settingsStore) setQuota(cfg quotaSettings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.val.Quota = cfg
 }
 
 // lifecycleRequest is the payload CPA sends for plugin.register /

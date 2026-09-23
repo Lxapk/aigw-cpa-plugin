@@ -24,7 +24,7 @@ func TestWorkBuddyCheckinBaseMatchesSource(t *testing.T) {
 	orig := workBuddyGlobalBase()
 	setWorkBuddyGlobalBase("https://www.workbuddy.ai")
 	defer setWorkBuddyGlobalBase(orig)
-	if got := workBuddyCheckinBase("global"); got != "https://www.workbuddy.ai" {
+	if got := workBuddyCheckinBase("www.workbuddy.ai"); got != "https://www.workbuddy.ai" {
 		t.Errorf("global check-in base = %q", got)
 	}
 }

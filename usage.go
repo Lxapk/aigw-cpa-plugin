@@ -143,6 +143,7 @@ type globalState struct {
 	pool     *credentialPool
 	log      *callLog
 	checkin  *checkinState
+	quota    *quotaState
 }
 
 var state = &globalState{
@@ -150,8 +151,10 @@ var state = &globalState{
 	pool:     newCredentialPool(),
 	log:      newCallLog(100),
 	checkin:  newCheckinState(),
+	quota:    newQuotaState(),
 }
 
 func shutdownPlugin() {
 	stopCheckinScheduler()
+	stopQuotaScheduler()
 }

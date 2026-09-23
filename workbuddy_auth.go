@@ -122,7 +122,7 @@ type workBuddyCredentials struct {
 // Note: the cn branch returns copilotHostValue() rather than the constant so the
 // token-refresh endpoint follows the same test redirect as the login endpoints.
 func workBuddyBaseURL(domain string) string {
-	if domain == workBuddyGlobalDomain {
+	if isWorkBuddyGlobalDomain(domain) {
 		return workBuddyGlobalBase()
 	}
 	return copilotHostValue()
@@ -132,7 +132,7 @@ func workBuddyBaseURL(domain string) string {
 //
 //	D(c0368a).equals("global") ? "https://www.workbuddy.ai" : "https://www.codebuddy.cn"
 func workBuddyOriginURL(domain string) string {
-	if domain == workBuddyGlobalDomain {
+	if isWorkBuddyGlobalDomain(domain) {
 		return "https://www.workbuddy.ai"
 	}
 	return "https://www.codebuddy.cn"

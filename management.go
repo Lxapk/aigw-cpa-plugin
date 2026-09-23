@@ -31,6 +31,11 @@ func managementRegistration() managementRegistrationResponse {
 				Menu:        "AIGW 签到",
 				Description: "WorkBuddy 每日签到：手动立即签到、配置自动签到、查看结果。",
 			},
+			{
+				Path:        "/quota",
+				Menu:        "AIGW 额度",
+				Description: "WorkBuddy 剩余额度：手动刷新、定时刷新、账号选用顺序。",
+			},
 		},
 		Routes: []pluginapi.ManagementRoute{
 			{
@@ -70,6 +75,26 @@ func managementRegistration() managementRegistrationResponse {
 				Path:        "/aigw-reverse-proxy/checkin/config",
 				Description: "Update the automatic check-in schedule.",
 			},
+			{
+				Method:      http.MethodGet,
+				Path:        "/aigw-reverse-proxy/quota",
+				Description: "WorkBuddy quota page.",
+			},
+			{
+				Method:      http.MethodGet,
+				Path:        "/aigw-reverse-proxy/quota/status",
+				Description: "WorkBuddy quota status as JSON.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/quota/refresh",
+				Description: "Refresh WorkBuddy quota for every account.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/quota/config",
+				Description: "Update the automatic quota refresh interval.",
+			},
 		},
 	}
 }
@@ -90,6 +115,16 @@ func handleManagement(request []byte) ([]byte, error) {
 	}
 	// Check-in endpoints are handled separately so this dispatch stays readable.
 	if resp, handled := handleCheckinRequest(pluginapi.ManagementRequest{
+		Method:  req.Method,
+		Path:    req.Path,
+		Headers: req.Headers,
+		Query:   req.Query,
+		Body:    req.Body,
+	}); handled {
+		return okEnvelope(resp)
+	}
+	// Quota endpoints follow the same pattern.
+	if resp, handled := handleQuotaRequest(pluginapi.ManagementRequest{
 		Method:  req.Method,
 		Path:    req.Path,
 		Headers: req.Headers,
@@ -242,6 +277,12 @@ func statusPage() string {
 	writeCard("失败", totals.TotalFailed)
 	writeCard("输入 Tokens", totals.TotalPrompt)
 	writeCard("输出 Tokens", totals.TotalCompletion)
+	// Mirror N1/R0.java:134 — "已知额度合计" shows "—" when nothing is known.
+	if total := totalKnownCredits(); total > 0 {
+		writeCard("已知额度合计", total)
+	} else {
+		writeCard("已知额度合计", "—")
+	}
 	b.WriteString("</div>")
 
 	b.WriteString("<h2>网关设置</h2><table><tr><th>项</th><th>值</th></tr>")

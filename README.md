@@ -102,6 +102,141 @@ CPA 已经自带 HTTP 服务器、路由、provider 执行器与凭据池。把�
 | **`a2/b.java:335` 上游对话** | **`executor.go` / `workbuddy_client.go`** | **`ProviderExecutor`** |
 | **`V1/o.k` step 6 路由分发** | **`model_router.go`** | **`ModelRouter`** |
 | **`a2/b.java:496` 每日签到** | **`checkin.go` / `checkin_client.go` / `checkin_page.go`** | **`ManagementAPI`** |
+| **`a2/b.java:406` 剩余额度** | **`quota.go` / `quota_client.go` / `quota_page.go`** | **`QuotaProvider`** |
+| **`A0/s.java:585` 账号选用顺序** | **`pool.go`** | （供上述 hook 共用） |
+
+---
+
+## 2.8 账号轮巡 / 区域选择 / 剩余额度（v0.5.0 新增）
+
+三个机制在源 APK 里是**串在一起**的：
+
+```
+额度查询 → 写入账号的 credits → 选号时取 credits 最大者
+```
+
+### 2.8.1 区域选择（`a2/b.java:284 D()`）
+
+**判定依据是凭据上的 `domain` 字段**，不是运行时探测：
+
+```java
+D(cred) {
+  d = cred.domain.toLowerCase()
+  if (d.endsWith(".workbuddy.ai") || d == "workbuddy.ai")  return "global"
+  else if (d.length() > 0)                                  return "cn"
+  else                                                      return 配置默认值
+}
+```
+
+即：**账号登录时用哪个站点，就永久归属哪个区域。**
+
+### base URL 映射（重要 —— 不是一刀切）
+
+| 用途 | global | cn |
+|---|---|---|
+| 对话 `/v2/chat/completions` | `www.workbuddy.ai` | **`copilot.tencent.com`** |
+| 模型列表 `/console/enterprises/personal/models` | `www.workbuddy.ai` | **`copilot.tencent.com`** |
+| 签到 `/v2/billing/meter/daily-checkin` | `www.workbuddy.ai` | **`www.codebuddy.cn`** |
+| **额度 `/v2/billing/meter/get-user-resource`** | `www.workbuddy.ai` | **`www.codebuddy.cn`** |
+| 登录 state/token | — | `copilot.tencent.com` |
+| **Origin/Referer 头** | `www.workbuddy.ai` | **`www.codebuddy.cn`** |
+
+> ⚠️ cn 域下**只有对话和模型列表**走 `copilot.tencent.com`，其余走 `codebuddy.cn`。
+> 混用会直接失败。
+
+### 2.8.2 剩余额度
+
+```
+POST {base}/v2/billing/meter/get-user-resource
+body: {PageNumber:1, PageSize:100, ProductCode:"p_tcaca",
+       Status:[0,3], PackageEndTimeRangeBegin/End: now ~ now+3185136000000ms}
+```
+
+响应（**注意首字母大写的嵌套**）：
+
+```
+data.Response.Data.Accounts[] {
+    CycleCapacitySize     周期总容量
+    CycleCapacityRemain   周期剩余
+    CapacityRemain        回退字段（上面两者都 <=0 时用）
+}
+```
+
+汇总规则（`a2/b.java:432-450`）：
+
+```
+sum = Σ( remain > 0 ? remain : 0 )      // 只累加正数
+```
+
+错误处理与源应用一致：
+
+| 情况 | 消息 |
+|---|---|
+| HTTP 非 2xx | `上游 HTTP <code><body>` |
+| 缺 `data` | `响应缺少 data` |
+| 其他异常 | `查询额度失败` |
+
+### 2.8.3 账号选用顺序（`A0/s.java:585 t()`）
+
+```java
+for (d in accounts) {
+    if (d.providerId != providerId) continue
+    if (exclude.contains(d.uid)) continue          // 本请求已试过的跳过
+    if (!d.disabled && d.enabled && now >= d.untilMillis) {
+        if (best == null || d.credits > best.credits) best = d   // ★ 额度最大
+    }
+}
+```
+
+**不是轮询（round-robin），而是「剩余额度最多者优先」。**
+
+> **在 CPA 里的现实**：选哪个凭据由 **CPA 的调度器**决定，插件无法插手
+> （插件注册的是 executor，CPA 选好 auth 后才把凭据传进来）。
+> 因此插件做的是：把额度读出来用于**展示与排序参考**（面板上的
+> 「账号选用顺序」表），并以同样的规则维护自己的账号池视图。
+
+### 失败分类 → 冷却（`W1.b` + `V1/k.java:164,168`）
+
+| 类型 | 触发 | 冷却时长 |
+|---|---|---|
+| `QUOTA` | 额度耗尽 / 限流 | `quota_cooldown_millis`（默认 12h），**并把 credits 归零** |
+| `SOFT` | 瞬时失败 | `soft_cooldown_millis`（默认 60s），连续 `error_threshold` 次后转 `error_cooldown_millis` |
+| `ERROR` | 鉴权/硬错误 | `quota_cooldown_millis` |
+
+### 使用
+
+管理面板多了 **「AIGW 额度」** 页：
+
+1. **管理密钥** — 与签到页共用（localStorage）
+2. **额度概览** — 「已知额度合计」（无数据时显示 `—`，对应 `N1/R0.java:134`）
+3. **刷新** — 「立即刷新全部额度」
+4. **自动刷新** — 开关 + 间隔（5-1440 分钟）+ 启动时刷新
+5. **账号选用顺序** — 按额度从多到少列出，含冷却类型与可用状态
+
+配置：
+
+```yaml
+plugins:
+  configs:
+    aigw-reverse-proxy:
+      quota:
+        enabled: true              # 打开定时刷新
+        interval_minutes: 30       # 每 30 分钟
+        refresh_on_start: true     # 启动时先刷一次
+```
+
+HTTP 接口：
+
+```bash
+KEY="你的 management key"; BASE="http://127.0.0.1:8317"
+P="aigw-reverse-proxy"
+
+curl -s "$BASE/v0/management/$P/quota/status"  -H "Authorization: Bearer $KEY"
+curl -s -X POST "$BASE/v0/management/$P/quota/refresh" -H "Authorization: Bearer $KEY"
+curl -s -X POST "$BASE/v0/management/$P/quota/config" \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"interval_minutes":30,"refresh_on_start":true}'
+```
 
 ---
 
@@ -435,6 +570,10 @@ curl -N http://127.0.0.1:8317/v1/chat/completions \
 | `/v1/models` 返回空数组 | 还没登录 WorkBuddy，或登录后模型目录没拉到（看日志；上游需 2xx + `code==0`） |
 | 401 `invalid_api_key` | 这是**客户端→CPA** 的鉴权，不是上游问题 |
 | 聊天返回上游错误 | 看响应里的 `upstream_status`；401/403 说明 WorkBuddy token 失效，重新登录 |
+| 额度刷新报 401/403 | token 失效，重新登录该账号 |
+| 额度显示 `—` | 尚未成功查询过任何账号；点「立即刷新全部额度」 |
+| 额度为 0 | 上游返回的 `CycleCapacityRemain` 与 `CapacityRemain` 都 <= 0（额度已用尽） |
+| 区域显示不对 | 检查凭据里的 `domain` 字段：以 `.workbuddy.ai` 结尾才算 global（`a2/b.java:284`） |
 | **`Unexpected JSON token at offset 5: Expected EOF after parsing, but had :`** | **流式 chunk 带了 SSE 的 `data:` 前缀**。CPA 的出站层按裸 JSON 解析每个 chunk，前缀由 CPA 自己加。v0.3.2 已修复，见下方「流式格式」 |
 | **`503 auth_not_found: no auth available (providers=codebuddy, ...)`** | **账号没写进 CPA 的 auth 存储**。见下方「账号落盘」。v0.3.1 已修复两个相关缺陷 |
 

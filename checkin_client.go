@@ -59,7 +59,7 @@ type checkinOutcome struct {
 //
 // The cn branch is redirectable so tests can point it at a local server.
 func workBuddyCheckinBase(domain string) string {
-	if domain == workBuddyGlobalDomain {
+	if isWorkBuddyGlobalDomain(domain) {
 		return workBuddyGlobalBase()
 	}
 	return checkinBaseForTest()

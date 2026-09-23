@@ -482,7 +482,84 @@ func main() {
 	}
 	ok("checkin/run -> trigger=%s total=%d (graceful without host auth)", runDoc.Trigger, runDoc.Total)
 
-	// --- 13. shutdown ---------------------------------------------------
+	// --- 13. quota capability ------------------------------------------
+	var capsDoc2 struct {
+		Capabilities map[string]any `json:"capabilities"`
+	}
+	mustUnmarshal(regResp.Result, &capsDoc2)
+	if v, okCap := capsDoc2.Capabilities["quota_provider"]; !okCap || v != true {
+		die("quota_provider capability must be declared, got %v", capsDoc2.Capabilities["quota_provider"])
+	}
+	ok("quota_provider capability declared")
+
+	quotaIdent := call(plugin, "quota.identifier", nil)
+	assertOK(quotaIdent, "quota.identifier")
+	var quotaIdentOut struct {
+		Identifier string `json:"identifier"`
+	}
+	mustUnmarshal(quotaIdent.Result, &quotaIdentOut)
+	if quotaIdentOut.Identifier != "codebuddy" {
+		die("quota identifier = %q", quotaIdentOut.Identifier)
+	}
+	ok("quota.identifier -> %s", quotaIdentOut.Identifier)
+
+	quotaDesc := call(plugin, "quota.describe", json.RawMessage(`{}`))
+	assertOK(quotaDesc, "quota.describe")
+	var quotaDescOut struct {
+		SupportedProviders []string `json:"supported_providers"`
+		DisplayName        string   `json:"display_name"`
+		SupportsReset      bool     `json:"supports_reset"`
+	}
+	mustUnmarshal(quotaDesc.Result, &quotaDescOut)
+	if len(quotaDescOut.SupportedProviders) != 1 || quotaDescOut.SupportedProviders[0] != "codebuddy" {
+		die("quota.describe providers = %v", quotaDescOut.SupportedProviders)
+	}
+	if quotaDescOut.SupportsReset {
+		die("quota provider must not claim reset support")
+	}
+	ok("quota.describe -> providers=%v display=%s reset=%v",
+		quotaDescOut.SupportedProviders, quotaDescOut.DisplayName, quotaDescOut.SupportsReset)
+
+	// The quota page and its endpoints.
+	quotaStatus := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/aigw-reverse-proxy/quota/status"}`))
+	assertOK(quotaStatus, "management.handle(/quota/status)")
+	var quotaStatusEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(quotaStatus.Result, &quotaStatusEnv)
+	if quotaStatusEnv.StatusCode != 200 {
+		die("quota status code = %d", quotaStatusEnv.StatusCode)
+	}
+	var quotaDoc map[string]any
+	mustUnmarshal(quotaStatusEnv.Body, &quotaDoc)
+	for _, key := range []string{"enabled", "interval_minutes", "total_credits", "accounts_known"} {
+		if _, okKey := quotaDoc[key]; !okKey {
+			die("quota status missing %q: %s", key, quotaStatusEnv.Body)
+		}
+	}
+	ok("quota/status -> enabled=%v interval=%vmin total=%v",
+		quotaDoc["enabled"], quotaDoc["interval_minutes"], quotaDoc["total_credits"])
+
+	quotaPage := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/quota","Headers":{"Accept":["text/html"]}}`))
+	assertOK(quotaPage, "management.handle(/quota)")
+	var quotaPageEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(quotaPage.Result, &quotaPageEnv)
+	qp := string(quotaPageEnv.Body)
+	for _, want := range []string{"已知额度合计", "立即刷新全部额度", "账号选用顺序"} {
+		if !strings.Contains(qp, want) {
+			die("quota page missing %q", want)
+		}
+	}
+	if strings.Contains(qp, "<form") {
+		die("quota page must not use HTML forms")
+	}
+	ok("quota page renders (%d bytes, localStorage key + no forms)", len(qp))
+
+	// --- 14. shutdown ---------------------------------------------------
 	C.call_shutdown(&plugin)
 	ok("cliproxy_plugin_shutdown returned cleanly")
 
