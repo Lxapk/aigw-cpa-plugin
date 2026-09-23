@@ -6,7 +6,7 @@
       "name": "AIGW 反向代理",
       "description": "从 AI 聚合网关 0.1.18 移植的反向代理网关",
       "author": "TaiXu",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "repository": "https://github.com/Lxapk/aigw-cpa-plugin",
       "license": "MIT",
       "install": {
