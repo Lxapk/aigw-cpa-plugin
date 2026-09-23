@@ -97,9 +97,86 @@ CPA 已经自带 HTTP 服务器、路由、provider 执行器与凭据池。把�
 | `V1/o.r()` 调用记账 | `usage.go` / `usage_handler.go` | `UsagePlugin` |
 | `A0.s` + `V1/k.c()` 账号池冷却 | `pool.go` | （供上述 hook 共用） |
 | `V1/s` + `AppUiState` 状态面板 | `management.go` | `ManagementAPI` |
+| **`N1/B` + `V1/k` WorkBuddy 设备码登录** | **`workbuddy_auth.go` / `auth_provider.go`** | **`AuthProvider`** |
 
 > 账号池的**轮换重试**由 CPA 自己的 auth 轮换机制承担；插件负责把源应用的**冷却策略**
 > （硬冷却 / 软冷却 / 永久停用）准确地喂给响应 hook。
+
+---
+
+## 2.5 WorkBuddy / CodeBuddy 账号登录（v0.2.0 新增）
+
+源应用里 WorkBuddy 的登录方式在 APK 中是**设备码（DEVICE_CODE）**，
+而不是 OAuth 回环 —— 这一点决定了它可以在远程服务器上工作：
+
+```java
+// jadxout/sources/Y1/b.java
+WEBVIEW_CALLBACK=0, DEVICE_CODE=1, SMS_CODE=2, OAUTH_LOOPBACK=3, NONE=4
+
+// jadxout/sources/a2/b.java:61
+public final Y1.b f4226c = Y1.b.f3993e;   // f3993e = DEVICE_CODE
+```
+
+### 登录流程（全部在插件内完成）
+
+```
+① 插件 POST https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI
+   ←  {"code":0,"data":{"state":"<uuid>","authUrl":"https://copilot.tencent.com/login?..."}}
+
+② 你把上面这个 authUrl 在浏览器打开并登录
+
+③ 插件轮询 GET https://copilot.tencent.com/v2/plugin/auth/token?state=<state>
+   ←  {"code":11217}                       → 继续等（N1/B.java 的 pending 分支）
+   ←  {"code":0,"data":{...credentials}}   → 成功
+   ←  {"code":<其他>,"msg":"..."}          → 失败
+
+④ 解析凭据 → 通过 host.auth.save 写入 CPA 账号存储
+```
+
+**关键点：全程不需要公网回调地址**，因为轮询是插件主动发起的。
+这也是它能在腾讯云服务器上跑通、而 OAuth 回环方式（APK 硬编码 `127.0.0.1:51120`）
+不行的根本原因。
+
+### 怎么用
+
+插件注册了 `AuthProvider` 后，CPA 管理面板会**自动出现 WorkBuddy 的登录入口**
+（面板从 `auth.identifier` 推导出 `<provider>-auth-url` 按钮）。
+
+1. 打开 `http://你的服务器:8317/management.html`
+2. 进入 **认证 / Auth**
+3. 找到 **WorkBuddy**（provider key 为 `codebuddy`），点登录
+4. 按提示在浏览器打开授权链接并登录
+5. 页面会自动轮询，登录完成后账号出现在列表里
+
+### 凭据字段（`a2/b.java:t()`）
+
+| 字段 | 别名 |
+|---|---|
+| `accessToken` | `access_token` |
+| `refreshToken` | `refresh_token` |
+| `expiresAt` | `expires_at` |
+| `uid` | `userId` / `user_id`（缺失时从 JWT claim 回填） |
+| `enterpriseId` | `enterprise_id` / `entId` / `tenantId` / `tenant_id`（同上） |
+| `nickname` | `nickName` / `name` |
+
+### 域名切换（`a2/b.java:q()`）
+
+| domain | API 基址 | Origin/Referer |
+|---|---|---|
+| `global` | `https://www.workbuddy.ai` | `https://www.workbuddy.ai` |
+| `cn`（默认） | `https://copilot.tencent.com` | `https://www.codebuddy.cn` |
+
+### 手动粘贴凭据
+
+除了交互式登录，管理面板的「上传认证文件」也支持本插件解析：
+
+- 完整的凭据 JSON（即 `a2/b.java:E()` 写出的格式）
+- 或直接粘贴一个裸 access token（插件会从 JWT 里解析 `uid` / `tenant_id` / `exp`）
+
+### token 刷新
+
+按 `a2/b.java:c()` 实现：`POST {base}/v2/plugin/auth/token/refresh`，
+并用 `expiresIn` 重算 `expiresAt`。
 
 ---
 

@@ -246,7 +246,72 @@ func main() {
 		statusDoc.Settings.Port, statusDoc.Settings.DefaultProvider, statusDoc.Settings.APIKey, statusDoc.Usage.TotalCalls,
 		statusDoc.Usage.TotalPrompt, statusDoc.Usage.TotalCompletion, len(statusDoc.Accounts))
 
-	// --- 9. shutdown ----------------------------------------------------
+	// --- 9. WorkBuddy / codebuddy login (AuthProvider) ------------------
+	// auth.identifier must return the provider key CPA derives the login
+	// button from.
+	identResp := call(plugin, "auth.identifier", nil)
+	assertOK(identResp, "auth.identifier")
+	var ident struct {
+		Identifier string `json:"identifier"`
+	}
+	mustUnmarshal(identResp.Result, &ident)
+	if ident.Identifier != "codebuddy" {
+		die("auth identifier = %q, want codebuddy", ident.Identifier)
+	}
+	ok("auth.identifier -> %s", ident.Identifier)
+
+	// auth.parse with a stored credential blob.
+	parseResp := call(plugin, "auth.parse", json.RawMessage(`{"Provider":"codebuddy","RawJSON":"eyJhY2Nlc3NUb2tlbiI6ImF0LXNtb2tlIiwicmVmcmVzaFRva2VuIjoicnQtc21va2UiLCJleHBpcmVzQXQiOjE4OTM0NTYwMDAsInVpZCI6InUtc21va2UiLCJuaWNrbmFtZSI6IlNtb2tlIn0="}`))
+	assertOK(parseResp, "auth.parse")
+	var parsed struct {
+		Handled bool `json:"Handled"`
+		Auth    struct {
+			Provider string `json:"Provider"`
+			ID       string `json:"ID"`
+			Label    string `json:"Label"`
+		} `json:"Auth"`
+	}
+	mustUnmarshal(parseResp.Result, &parsed)
+	if !parsed.Handled || parsed.Auth.ID != "u-smoke" {
+		die("auth.parse result unexpected: %s", parseResp.Result)
+	}
+	ok("auth.parse -> provider=%s id=%s label=%s", parsed.Auth.Provider, parsed.Auth.ID, parsed.Auth.Label)
+
+	// auth.login.start hits Tencent's real device-code endpoint. We only assert
+	// that it either succeeds (returning a URL + state) or fails cleanly; the
+	// sandbox may not reach copilot.tencent.com and the plugin must not crash.
+	startResp := call(plugin, "auth.login.start", json.RawMessage(`{"Provider":"codebuddy"}`))
+	if startResp.OK {
+		var started struct {
+			Provider string `json:"Provider"`
+			URL      string `json:"URL"`
+			State    string `json:"State"`
+		}
+		mustUnmarshal(startResp.Result, &started)
+		if started.URL == "" || started.State == "" {
+			die("auth.login.start returned empty url/state: %s", startResp.Result)
+		}
+		ok("auth.login.start -> state=%s url=%s", started.State, started.URL)
+
+		// Polling a brand-new state should report "pending" (Tencent returns
+		// code 11217) or a clean error if the network is unavailable.
+		pollResp := call(plugin, "auth.login.poll", json.RawMessage(`{"Provider":"codebuddy","State":"`+started.State+`"}`))
+		assertOK(pollResp, "auth.login.poll")
+		var polled struct {
+			Status  string `json:"Status"`
+			Message string `json:"Message"`
+		}
+		mustUnmarshal(pollResp.Result, &polled)
+		if polled.Status != "pending" && polled.Status != "error" {
+			die("unexpected poll status %q", polled.Status)
+		}
+		ok("auth.login.poll -> status=%s", polled.Status)
+	} else {
+		// A clean error envelope is acceptable; a crash is not.
+		ok("auth.login.start unreachable from sandbox (expected): %s", startErrCode(startResp))
+	}
+
+	// --- 10. shutdown ---------------------------------------------------
 	C.call_shutdown(&plugin)
 	ok("cliproxy_plugin_shutdown returned cleanly")
 
@@ -303,6 +368,14 @@ func assertOK(env envelope, what string) {
 		}
 		die("%s failed: not ok", what)
 	}
+}
+
+// startErrCode renders the error code of a failed auth.login.start envelope.
+func startErrCode(env envelope) string {
+	if env.Error == nil {
+		return "unknown"
+	}
+	return env.Error.Code
 }
 
 func mustUnmarshal(raw json.RawMessage, out any) {

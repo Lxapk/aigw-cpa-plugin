@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "aigw-reverse-proxy"
-	pluginVersion = "0.1.0"
+	pluginVersion = "0.2.0"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -68,6 +68,7 @@ type registration struct {
 // registrationCaps mirrors pluginhost.rpcCapabilities. Only the fields this
 // plugin sets are declared; the rest default to false/empty.
 type registrationCaps struct {
+	AuthProvider                  bool   `json:"auth_provider"`
 	FrontendAuthProvider          bool   `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool   `json:"frontend_auth_provider_exclusive"`
 	RequestInterceptor            bool   `json:"request_interceptor"`
@@ -107,6 +108,22 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodPluginShutdown:
 		shutdownPlugin()
 		return okEnvelope(map[string]any{})
+
+	// ---- WorkBuddy / codebuddy login (port of N1/B + V1/k) ------------
+	case pluginabi.MethodAuthIdentifier:
+		return authIdentifier()
+
+	case pluginabi.MethodAuthParse:
+		return authParse(request)
+
+	case pluginabi.MethodAuthLoginStart:
+		return authLoginStart(request)
+
+	case pluginabi.MethodAuthLoginPoll:
+		return authLoginPoll(request)
+
+	case pluginabi.MethodAuthRefresh:
+		return authRefresh(request)
 
 	// ---- frontend auth (port of V1/o.j) -------------------------------
 	case pluginabi.MethodFrontendAuthIdentifier:
@@ -172,6 +189,7 @@ func buildRegistration() registration {
 			},
 		},
 		Capabilities: registrationCaps{
+			AuthProvider:                  true,
 			FrontendAuthProvider:          true,
 			FrontendAuthProviderExclusive: false,
 			RequestInterceptor:            true,
