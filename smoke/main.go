@@ -382,13 +382,11 @@ func main() {
 	}
 	mustUnmarshal(mgmtReg.Result, &mgmtRegOut)
 
-	var sawCheckin bool
+	// The combined page is the only resource; check-in lives behind its tab.
+	sawHome := false
 	for _, r := range mgmtRegOut.Resources {
-		// The combined page is the only resource; check-in lives behind its tab.
-		sawHome := false
-		for _, r := range mgmtRegOut.Resources {
-			if r.Path == "home" {
-				sawHome = true
+		if r.Path == "home" {
+			sawHome = true
 		}
 	}
 	if !sawHome {
@@ -425,7 +423,7 @@ func main() {
 	}
 	mustUnmarshal(ckPage.Result, &ckPageEnv)
 	page := string(ckPageEnv.Body)
-	for _, want := range []string{"手动签到", "自动签到", "立即为所有账号签到"} {
+	for _, want := range []string{"自动签到", "立即签到", "签到 + 刷新积分"} {
 		if !strings.Contains(page, want) {
 			die("check-in page missing %q", want)
 		}
@@ -550,7 +548,7 @@ func main() {
 	}
 	mustUnmarshal(quotaPage.Result, &quotaPageEnv)
 	qp := string(quotaPageEnv.Body)
-	for _, want := range []string{"已知额度合计", "立即刷新全部额度", "账号选用顺序"} {
+	for _, want := range []string{"积分合计", "立即刷新积分", "账号切换策略"} {
 		if !strings.Contains(qp, want) {
 			die("quota page missing %q", want)
 		}
@@ -575,7 +573,7 @@ func main() {
 		die("combined page status=%d len=%d", homeEnv.StatusCode, len(homeEnv.Body))
 	}
 	home := string(homeEnv.Body)
-	for _, want := range []string{"管理密钥", "WorkBuddy 账号", "签到设置", "额度刷新设置", "调用统计", "网关设置"} {
+	for _, want := range []string{"管理密钥", "账号列表", "自动签到", "自动刷新积分", "最近调用", "网关设置"} {
 		if !strings.Contains(home, want) {
 			die("combined page missing %q", want)
 		}
