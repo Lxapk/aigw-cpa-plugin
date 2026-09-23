@@ -732,6 +732,7 @@ func resetState() {
 		log:      newCallLog(100),
 		checkin:  newCheckinState(),
 		quota:    newQuotaState(),
+		accounts: newAccountStore(),
 	}
 	inflight = newInflightMap()
 	streamAccumulators.mu.Lock()

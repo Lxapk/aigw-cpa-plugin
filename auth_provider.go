@@ -331,6 +331,10 @@ func saveAuthThroughHost(auth pluginapi.AuthData) error {
 		return errCall
 	}
 
+	// A newly written credential must appear in the account list immediately,
+	// without waiting for a request to exercise it.
+	refreshAccountsAfterLogin()
+
 	// CPA reports the physical file it wrote; log it for troubleshooting.
 	var saved pluginapi.HostAuthSaveResponse
 	if errUnmarshal := json.Unmarshal(result, &saved); errUnmarshal == nil {

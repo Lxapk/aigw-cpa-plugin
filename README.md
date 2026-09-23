@@ -643,6 +643,93 @@ docker exec 你的CPA容器名 find / -name "codebuddy-*.json" 2>/dev/null
 > 如果登录时插件无法写盘，登录响应里会带上「写入 CPA 账号存储失败：...」的提示，
 > 凭据仍会返回，便于手动排查。
 
+## 2.9 单一界面 + 账号直读（v0.6.0）
+
+### 一个页面装下全部
+
+管理面板的 **「AIGW 反向代理」** 入口现在是一个完整页面，包含：
+
+```
+AI 聚合网关 · 反向代理
+├─ 管理密钥          （存浏览器 localStorage）
+├─ WorkBuddy 账号    ← 账号列表 + 一键「签到 + 刷新额度」
+├─ 签到设置          （开关 + 每日时间 + 启动补跑）
+├─ 额度刷新设置      （开关 + 间隔 + 启动刷新）
+├─ 调用统计          （总调用/今日/失败/Tokens + 最近调用）
+└─ 网关设置          （api_key 等只读摘要）
+```
+
+顶部有锚点导航，单页内跳转。`/checkin` 与 `/quota` 仍保留为**独立视图**
+（方便书签），但内容已包含在主页内。
+
+### 账号登录后立即可见
+
+**之前的实现有缺陷**：账号列表读的是插件自己的**凭据池**，而凭据池只在
+「发生请求」或「额度刷新」时才被填充 —— 所以刚登录的账号**要等第一次调用才出现**。
+
+**现在改为直读 CPA 的认证存储**（`host.auth.list`），这是账号的权威来源：
+
+```
+登录完成 → saveAuthThroughHost() → 主动失效缓存
+                                      ↓
+              页面重新渲染时直接列出该账号（无需任何调用）
+```
+
+对应源 APK 的行为：它是从自己的账号库（`A0.s`）直接列出的，不依赖流量。
+
+### 只显示 WorkBuddy 账号
+
+严格过滤，**其他供应商（Anthropic / OpenAI / Gemini 等）一律不出现**：
+
+```go
+// accounts.go isWorkBuddyAuthEntry
+provider 或 type 等于 "codebuddy" 或 "WorkBuddy"      → 收录
+auth 文件名以 "codebuddy-" / "codebuddy_" 开头        → 收录
+其他                                                  → 过滤掉
+```
+
+### 账号状态一目了然
+
+| 列 | 说明 |
+|---|---|
+| 账号 | 显示名（nickname / label / UID 回退） |
+| UID | 供应商侧用户 ID |
+| 区域 | `cn` 或 `global`（由凭据 domain 推导，`a2/b.java:284`） |
+| 剩余额度 | 已查询则显示数值，否则 `—` |
+| 状态 | 可用 / 冷却中（含截止时间）/ 已停用 / 凭据已过期 |
+
+**损坏的凭据文件也会列出来**（状态显示「凭据无法解析」），而不是静默消失 ——
+这样你至少知道有这么个文件需要处理。
+
+### 一键操作
+
+页面上的 **「一键：签到 + 刷新额度」** 会依次：
+
+1. 读账号列表
+2. 逐个签到
+3. 逐个查额度
+4. 刷新页面显示结果
+
+对应的 HTTP 接口：
+
+```bash
+curl -s -X POST "$BASE/v0/management/aigw-reverse-proxy/run" \
+  -H "Authorization: Bearer $KEY"
+```
+
+### 账号列表 JSON
+
+```bash
+curl -s "$BASE/v0/management/aigw-reverse-proxy/accounts" \
+  -H "Authorization: Bearer $KEY"
+```
+
+返回 `{accounts, total, usable, credits_known, total_credits, fetched_at, warning}`。
+
+> 列表有 **5 秒缓存**，避免每次渲染都打宿主的 auth 存储。
+> 登录成功后会主动失效缓存，所以新账号立刻可见。
+> 宿主读取失败时**返回上一次的缓存**并把错误放进 `warning`，页面不会变空。
+
 ---
 
 ## 3. 获取与构建

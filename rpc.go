@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "aigw-reverse-proxy"
-	pluginVersion = "0.5.0"
+	pluginVersion = "0.6.0"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )

@@ -169,6 +169,7 @@ type hostAuthEntry struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name"`
 	Label       string          `json:"label"`
+	Disabled    bool            `json:"disabled"`
 	StorageJSON json.RawMessage `json:"storage_json"`
 }
 

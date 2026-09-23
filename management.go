@@ -22,22 +22,33 @@ func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Resources: []pluginapi.ResourceRoute{
 			{
-				Path:        "/status",
+				// The single combined view is the primary entry point.
+				Path:        "/",
 				Menu:        "AIGW 反向代理",
-				Description: "AI 聚合网关反向代理插件状态：路由设置、账号池冷却、调用统计。",
+				Description: "WorkBuddy 账号、签到、额度与调用统计，全部集中在这一页。",
 			},
 			{
 				Path:        "/checkin",
 				Menu:        "AIGW 签到",
-				Description: "WorkBuddy 每日签到：手动立即签到、配置自动签到、查看结果。",
+				Description: "仅签到视图（也包含在主页内）。",
 			},
 			{
 				Path:        "/quota",
 				Menu:        "AIGW 额度",
-				Description: "WorkBuddy 剩余额度：手动刷新、定时刷新、账号选用顺序。",
+				Description: "仅额度视图（也包含在主页内）。",
 			},
 		},
 		Routes: []pluginapi.ManagementRoute{
+			{
+				Method:      http.MethodGet,
+				Path:        "/aigw-reverse-proxy/accounts",
+				Description: "WorkBuddy account list as JSON (read from the auth store).",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/run",
+				Description: "Run check-in and quota refresh in one call.",
+			},
 			{
 				Method:      http.MethodGet,
 				Path:        "/aigw-reverse-proxy/status",
@@ -112,6 +123,16 @@ func handleManagement(request []byte) ([]byte, error) {
 	// Strip the plugin resource prefix when CPA passes the full path.
 	if idx := strings.Index(path, "/aigw-reverse-proxy"); idx >= 0 {
 		path = path[idx+len("/aigw-reverse-proxy"):]
+	}
+	// The combined view and its JSON endpoints.
+	if resp, handled := handleMainRequest(pluginapi.ManagementRequest{
+		Method:  req.Method,
+		Path:    req.Path,
+		Headers: req.Headers,
+		Query:   req.Query,
+		Body:    req.Body,
+	}); handled {
+		return okEnvelope(resp)
 	}
 	// Check-in endpoints are handled separately so this dispatch stays readable.
 	if resp, handled := handleCheckinRequest(pluginapi.ManagementRequest{

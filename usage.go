@@ -144,6 +144,7 @@ type globalState struct {
 	log      *callLog
 	checkin  *checkinState
 	quota    *quotaState
+	accounts *accountStore
 }
 
 var state = &globalState{
@@ -152,6 +153,7 @@ var state = &globalState{
 	log:      newCallLog(100),
 	checkin:  newCheckinState(),
 	quota:    newQuotaState(),
+	accounts: newAccountStore(),
 }
 
 func shutdownPlugin() {

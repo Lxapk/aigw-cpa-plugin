@@ -559,7 +559,58 @@ func main() {
 	}
 	ok("quota page renders (%d bytes, localStorage key + no forms)", len(qp))
 
-	// --- 14. shutdown ---------------------------------------------------
+	// --- 15. combined single page + account listing ----------------------
+	// The account list must be readable straight from the auth store, so a
+	// freshly logged-in account shows up without any traffic, and only
+	// WorkBuddy entries may appear.
+	homeResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/","Headers":{"Accept":["text/html"]}}`))
+	assertOK(homeResp, "management.handle(/ combined page)")
+	var homeEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(homeResp.Result, &homeEnv)
+	if homeEnv.StatusCode != 200 || len(homeEnv.Body) == 0 {
+		die("combined page status=%d len=%d", homeEnv.StatusCode, len(homeEnv.Body))
+	}
+	home := string(homeEnv.Body)
+	for _, want := range []string{"管理密钥", "WorkBuddy 账号", "签到设置", "额度刷新设置", "调用统计", "网关设置"} {
+		if !strings.Contains(home, want) {
+			die("combined page missing %q", want)
+		}
+	}
+	if strings.Contains(home, "<form") {
+		die("combined page must not use HTML forms")
+	}
+	ok("combined page renders all sections (%d bytes, no forms)", len(home))
+
+	accountsResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/aigw-reverse-proxy/accounts"}`))
+	assertOK(accountsResp, "management.handle(/accounts)")
+	var accountsEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(accountsResp.Result, &accountsEnv)
+	if accountsEnv.StatusCode != 200 {
+		die("accounts endpoint status = %d", accountsEnv.StatusCode)
+	}
+	var accountsDoc struct {
+		Accounts []struct {
+			AuthIndex string `json:"auth_index"`
+		} `json:"accounts"`
+		Total int `json:"total"`
+	}
+	mustUnmarshal(accountsEnv.Body, &accountsDoc)
+	// This smoke host implements no host.auth.list, so the list is empty but
+	// the endpoint must still answer cleanly.
+	for _, a := range accountsDoc.Accounts {
+		if !strings.HasPrefix(a.AuthIndex, "codebuddy") {
+			die("account list leaked a non-WorkBuddy entry: %s", a.AuthIndex)
+		}
+	}
+	ok("accounts endpoint -> total=%d (only WorkBuddy entries)", accountsDoc.Total)
+
+	// --- 16. shutdown ---------------------------------------------------
 	C.call_shutdown(&plugin)
 	ok("cliproxy_plugin_shutdown returned cleanly")
 
