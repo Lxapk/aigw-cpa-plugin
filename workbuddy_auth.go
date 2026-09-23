@@ -27,13 +27,13 @@ import (
 // Because WorkBuddy uses DEVICE_CODE rather than an OAuth loopback, the flow
 // works from a remote server with no public callback URL:
 //
-//	1. POST https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI
-//	     -> {"code":0,"data":{"state":"<uuid>","authUrl":"https://..."}}
-//	2. user opens authUrl and signs in
-//	3. GET  https://copilot.tencent.com/v2/plugin/auth/token?state=<state>
-//	     -> {"code":11217}                      still waiting
-//	     -> {"code":0,"data":{...credentials}}  success
-//	     -> {"code":<other>,"msg":"..."}        failure
+//  1. POST https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI
+//     -> {"code":0,"data":{"state":"<uuid>","authUrl":"https://..."}}
+//  2. user opens authUrl and signs in
+//  3. GET  https://copilot.tencent.com/v2/plugin/auth/token?state=<state>
+//     -> {"code":11217}                      still waiting
+//     -> {"code":0,"data":{...credentials}}  success
+//     -> {"code":<other>,"msg":"..."}        failure
 //
 // Smali / source anchors:
 //
@@ -47,8 +47,8 @@ const (
 	workBuddyDisplayName = "WorkBuddy"
 
 	// copilotHostDefault is Tencent's CLI auth host, used for both the state and
-// token endpoints (V1/k.java:378 and N1/B.java:55). It is a variable so
-// tests can point the flow at a local server.
+	// token endpoints (V1/k.java:378 and N1/B.java:55). It is a variable so
+	// tests can point the flow at a local server.
 	copilotHostDefault = "https://copilot.tencent.com"
 
 	// workBuddyGlobalDefault is the international WorkBuddy API host (a2/b.q()).
@@ -337,6 +337,13 @@ func (c *workBuddyCredentials) authID() string {
 		return c.UID
 	}
 	return fmt.Sprintf("%s-%d", workBuddyProviderKey, hashString(c.AccessToken))
+}
+
+// AuthKey is the cache key for credential-scoped data such as the model
+// catalogue. It must change whenever the effective identity changes, so a
+// refreshed token for the same user still hits the same cache slot.
+func (c *workBuddyCredentials) AuthKey() string {
+	return c.Domain + "/" + c.authID()
 }
 
 func (c *workBuddyCredentials) label() string {

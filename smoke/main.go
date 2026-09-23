@@ -124,8 +124,8 @@ func main() {
 		Capabilities map[string]any `json:"capabilities"`
 	}
 	mustUnmarshal(regResp.Result, &reg)
-	if len(reg.Metadata.ConfigFields) != 15 {
-		die("expected 15 config fields, got %d", len(reg.Metadata.ConfigFields))
+	if len(reg.Metadata.ConfigFields) != 16 {
+		die("expected 16 config fields, got %d", len(reg.Metadata.ConfigFields))
 	}
 	ok("registered %s v%s (schema=%d, config_fields=%d)", reg.Metadata.Name, reg.Metadata.Version, reg.SchemaVersion, len(reg.Metadata.ConfigFields))
 	for _, cap := range []string{"frontend_auth_provider", "request_interceptor", "response_interceptor", "response_stream_interceptor", "usage_plugin", "management_api"} {
@@ -311,7 +311,67 @@ func main() {
 		ok("auth.login.start unreachable from sandbox (expected): %s", startErrCode(startResp))
 	}
 
-	// --- 10. shutdown ---------------------------------------------------
+	// --- 11. model catalogue + execution capabilities --------------------
+	// These four capabilities are what make WorkBuddy's models visible in
+	// /v1/models and callable through /v1/chat/completions.
+	var capsDoc struct {
+		Capabilities map[string]any `json:"capabilities"`
+	}
+	mustUnmarshal(regResp.Result, &capsDoc)
+	for _, key := range []string{"model_provider", "model_router", "executor"} {
+		if v, okCap := capsDoc.Capabilities[key]; !okCap || v != true {
+			die("capability %q must be declared, got %v", key, capsDoc.Capabilities)
+		}
+	}
+	ok("model_provider / model_router / executor declared (scope=%v)", capsDoc.Capabilities["executor_model_scope"])
+
+	// executor.identifier
+	execIdent := call(plugin, "executor.identifier", nil)
+	assertOK(execIdent, "executor.identifier")
+	var execIdentOut struct {
+		Identifier string `json:"identifier"`
+	}
+	mustUnmarshal(execIdent.Result, &execIdentOut)
+	if execIdentOut.Identifier != "codebuddy" {
+		die("executor identifier = %q", execIdentOut.Identifier)
+	}
+	ok("executor.identifier -> %s", execIdentOut.Identifier)
+
+	// model.for_auth with an unparseable credential must degrade to an empty
+	// catalogue rather than an error, so the host keeps serving other providers.
+	modelRes := call(plugin, "model.for_auth", json.RawMessage(`{"AuthProvider":"codebuddy","StorageJSON":"bm90IGpzb24="}`))
+	assertOK(modelRes, "model.for_auth")
+	var modelOut struct {
+		Provider string `json:"Provider"`
+		Models   []any  `json:"Models"`
+	}
+	mustUnmarshal(modelRes.Result, &modelOut)
+	if modelOut.Provider != "codebuddy" {
+		die("model.for_auth provider = %q", modelOut.Provider)
+	}
+	ok("model.for_auth -> provider=%s models=%d (graceful on bad auth)", modelOut.Provider, len(modelOut.Models))
+
+	// model.route must defer to other providers and claim only our own models.
+	routeRes := call(plugin, "model.route", json.RawMessage(`{"SourceFormat":"chat-completions","RequestedModel":"openai/gpt-4o"}`))
+	assertOK(routeRes, "model.route(foreign)")
+	var routeOut struct {
+		Handled bool `json:"Handled"`
+	}
+	mustUnmarshal(routeRes.Result, &routeOut)
+	if routeOut.Handled {
+		die("model.route must not claim a foreign provider prefix")
+	}
+	ok("model.route defers foreign provider prefixes")
+
+	routeRes = call(plugin, "model.route", json.RawMessage(`{"SourceFormat":"chat-completions","RequestedModel":"codebuddy/anything"}`))
+	assertOK(routeRes, "model.route(own)")
+	mustUnmarshal(routeRes.Result, &routeOut)
+	if !routeOut.Handled {
+		die("model.route must claim the explicit codebuddy/ prefix")
+	}
+	ok("model.route claims explicit codebuddy/ prefix")
+
+	// --- 12. shutdown ---------------------------------------------------
 	C.call_shutdown(&plugin)
 	ok("cliproxy_plugin_shutdown returned cleanly")
 

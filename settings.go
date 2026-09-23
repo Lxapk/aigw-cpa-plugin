@@ -64,6 +64,9 @@ type gatewaySettings struct {
 	// DefaultProvider mirrors defaultProvider: used when the requested model
 	// carries no explicit "provider/model" prefix.
 	DefaultProvider string `json:"default_provider" yaml:"default_provider"`
+	// DefaultModel is the model used when the client asks for "auto" or omits
+	// the model entirely, mirroring a2/b.java k()'s configured default.
+	DefaultModel string `json:"default_model" yaml:"default_model"`
 	// EnforceDefaultProvider, when true, rejects requests that address a
 	// provider other than DefaultProvider. The original app always honoured an
 	// explicit "provider/model" prefix, so this defaults to false.

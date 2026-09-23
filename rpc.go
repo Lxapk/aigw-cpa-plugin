@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "aigw-reverse-proxy"
-	pluginVersion = "0.2.0"
+	pluginVersion = "0.3.0"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -60,22 +60,31 @@ type identifierResponse struct {
 
 // registration mirrors pluginhost.rpcRegistration.
 type registration struct {
-	SchemaVersion uint32           `json:"schema_version"`
+	SchemaVersion uint32             `json:"schema_version"`
 	Metadata      pluginapi.Metadata `json:"metadata"`
-	Capabilities  registrationCaps `json:"capabilities"`
+	Capabilities  registrationCaps   `json:"capabilities"`
 }
 
 // registrationCaps mirrors pluginhost.rpcCapabilities. Only the fields this
 // plugin sets are declared; the rest default to false/empty.
 type registrationCaps struct {
-	AuthProvider                  bool   `json:"auth_provider"`
-	FrontendAuthProvider          bool   `json:"frontend_auth_provider"`
-	FrontendAuthProviderExclusive bool   `json:"frontend_auth_provider_exclusive"`
-	RequestInterceptor            bool   `json:"request_interceptor"`
-	ResponseInterceptor           bool   `json:"response_interceptor"`
-	StreamChunkInterceptor        bool   `json:"response_stream_interceptor"`
-	UsagePlugin                   bool   `json:"usage_plugin"`
-	ManagementAPI                 bool   `json:"management_api"`
+	AuthProvider                  bool `json:"auth_provider"`
+	FrontendAuthProvider          bool `json:"frontend_auth_provider"`
+	FrontendAuthProviderExclusive bool `json:"frontend_auth_provider_exclusive"`
+	RequestInterceptor            bool `json:"request_interceptor"`
+	ResponseInterceptor           bool `json:"response_interceptor"`
+	StreamChunkInterceptor        bool `json:"response_stream_interceptor"`
+	UsagePlugin                   bool `json:"usage_plugin"`
+	ManagementAPI                 bool `json:"management_api"`
+
+	// Model catalogue + execution. These four are what make WorkBuddy's models
+	// visible in /v1/models and callable through /v1/chat/completions.
+	ModelProvider         bool     `json:"model_provider"`
+	ModelRouter           bool     `json:"model_router"`
+	Executor              bool     `json:"executor"`
+	ExecutorModelScope    string   `json:"executor_model_scope"`
+	ExecutorInputFormats  []string `json:"executor_input_formats"`
+	ExecutorOutputFormats []string `json:"executor_output_formats"`
 }
 
 // managementRegistrationResponse mirrors pluginhost.rpcManagementRegistrationResponse.
@@ -124,6 +133,33 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 
 	case pluginabi.MethodAuthRefresh:
 		return authRefresh(request)
+
+	// ---- model catalogue (port of a2/b.java:745 w()) -------------------
+	case pluginabi.MethodModelStatic:
+		return modelStatic(request)
+
+	case pluginabi.MethodModelForAuth:
+		return modelForAuth(request)
+
+	// ---- request routing (port of V1/o.k step 6) -----------------------
+	case pluginabi.MethodModelRoute:
+		return modelRoute(request)
+
+	// ---- upstream execution (port of a2/b.java:335 b()) ----------------
+	case pluginabi.MethodExecutorIdentifier:
+		return executorIdentifier()
+
+	case pluginabi.MethodExecutorExecute:
+		return executorExecute(request)
+
+	case pluginabi.MethodExecutorExecuteStream:
+		return executorExecuteStream(request)
+
+	case pluginabi.MethodExecutorCountTokens:
+		return executorCountTokens(request)
+
+	case pluginabi.MethodExecutorHTTPRequest:
+		return executorHTTPRequest(request)
 
 	// ---- frontend auth (port of V1/o.j) -------------------------------
 	case pluginabi.MethodFrontendAuthIdentifier:
@@ -184,6 +220,7 @@ func buildRegistration() registration {
 				{Name: "error_cooldown_millis", Type: pluginapi.ConfigFieldTypeInteger, Description: "Park duration once error_threshold is reached (V1/s.errorCooldownMillis)."},
 				{Name: "log_retention_days", Type: pluginapi.ConfigFieldTypeInteger, Description: "Retention window for the call log (V1/s.logRetentionDays)."},
 				{Name: "default_provider", Type: pluginapi.ConfigFieldTypeString, Description: "Provider used when the model carries no \"provider/model\" prefix (V1/s.defaultProvider)."},
+				{Name: "default_model", Type: pluginapi.ConfigFieldTypeString, Description: "Model used when the client asks for \"auto\" or omits the model (a2/b.java k())."},
 				{Name: "enforce_default_provider", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reject models that address a provider other than default_provider."},
 				{Name: "debug", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Emit verbose plugin logging."},
 			},
@@ -197,6 +234,16 @@ func buildRegistration() registration {
 			StreamChunkInterceptor:        true,
 			UsagePlugin:                   true,
 			ManagementAPI:                 true,
+
+			ModelProvider: true,
+			ModelRouter:   true,
+			Executor:      true,
+			// WorkBuddy credentials are auth-bound, so both scopes apply.
+			ExecutorModelScope: string(pluginapi.ExecutorModelScopeBoth),
+			// WorkBuddy speaks OpenAI chat-completions natively in both
+			// directions; no translation layer is needed.
+			ExecutorInputFormats:  []string{"chat-completions"},
+			ExecutorOutputFormats: []string{"chat-completions"},
 		},
 	}
 }

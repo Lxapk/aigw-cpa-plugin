@@ -98,6 +98,9 @@ CPA 已经自带 HTTP 服务器、路由、provider 执行器与凭据池。把�
 | `A0.s` + `V1/k.c()` 账号池冷却 | `pool.go` | （供上述 hook 共用） |
 | `V1/s` + `AppUiState` 状态面板 | `management.go` | `ManagementAPI` |
 | **`N1/B` + `V1/k` WorkBuddy 设备码登录** | **`workbuddy_auth.go` / `auth_provider.go`** | **`AuthProvider`** |
+| **`a2/b.java:745` 模型目录** | **`model_provider.go` / `workbuddy_client.go`** | **`ModelProvider`** |
+| **`a2/b.java:335` 上游对话** | **`executor.go` / `workbuddy_client.go`** | **`ProviderExecutor`** |
+| **`V1/o.k` step 6 路由分发** | **`model_router.go`** | **`ModelRouter`** |
 
 > 账号池的**轮换重试**由 CPA 自己的 auth 轮换机制承担；插件负责把源应用的**冷却策略**
 > （硬冷却 / 软冷却 / 永久停用）准确地喂给响应 hook。
@@ -177,6 +180,100 @@ public final Y1.b f4226c = Y1.b.f3993e;   // f3993e = DEVICE_CODE
 
 按 `a2/b.java:c()` 实现：`POST {base}/v2/plugin/auth/token/refresh`，
 并用 `expiresIn` 重算 `expiresAt`。
+
+---
+
+## 2.6 把 WorkBuddy 模型以 OpenAI 格式输出（v0.3.0 新增）
+
+这是本插件的**核心用途**：登录 WorkBuddy 后，把它账号下的模型通过 CPA 暴露成
+标准 OpenAI 端点，供任意客户端调用。
+
+### 上游接口（`a2/b.java`）
+
+| 用途 | 方法 | 路径 |
+|---|---|---|
+| 模型目录 | `GET` | `{base}/console/enterprises/personal/models` |
+| 对话 | `POST` | `{base_q}/v2/chat/completions` |
+
+`base` / `base_q` 取决于 `domain`：
+
+| domain | chat / models 基址 |
+|---|---|
+| `global` | `https://www.workbuddy.ai` |
+| `cn`（默认） | `https://copilot.tencent.com` |
+
+> **关键优势**：`/v2/chat/completions` 本身就是 **OpenAI Chat Completions 协议**
+> （源码里直接读 `stream` / `model` / `tool_choice`），所以**不需要任何格式翻译层** ——
+> 客户端请求体只改 `model` 字段后原样透传，响应也原样返回。
+
+### 模型列表过滤规则（`a2/b.java:745 w()`）
+
+```
+1. HTTP 必须 2xx，否则报「模型接口 HTTP <code>」
+2. 响应必须是合法 JSON，否则报「模型响应不是合法 JSON」
+3. code 必须存在且为 0，否则报「模型接口 code=<code>」
+4. data 缺失 → 空列表
+5. 取 agents 中 name=="cli" 的 models 作为白名单（为空则代表不限制）
+6. 遍历 data.models[]，逐个保留满足以下全部条件的：
+     - id 非空
+     - id 未出现过（去重）
+     - 白名单为空 或 id ∈ 白名单
+     - disabled != true
+   name 为空时显示名回退为 id；maxInputTokens 映射为 InputTokenLimit
+```
+
+### 模型名处理（`a2/b.java:583 k()`）
+
+```
+model = trim(请求里的 model)
+if model == "" || model == "auto"  →  用配置的 default_model
+```
+
+插件还会额外剥掉 `codebuddy/` 前缀（对应源网关 `V1/o.k` 的显式供应商形式）。
+
+### 路由决策（`model_router.go`）
+
+CPA 需要知道"哪个请求该交给本插件的 executor"。插件按以下顺序判断：
+
+1. 只处理 `chat-completions` 源格式，其他格式一律不管
+2. `codebuddy/<model>` 显式前缀 → 认领（并剥掉前缀）
+3. `<其他供应商>/<model>` 显式前缀 → **不认领**，让给对应供应商
+4. 否则查已缓存的模型目录，命中则认领
+
+### 配置项
+
+```yaml
+plugins:
+  configs:
+    aigw-reverse-proxy:
+      default_model: "auto"    # 空或 auto 时用这个；留空则用目录里第一个
+```
+
+> 模型名 **直接使用 WorkBuddy 原生名**，不做重命名 —— 这样客户端看到什么就能调什么。
+
+### 调用示例
+
+```bash
+# 先看有哪些模型（登录后自动从 WorkBuddy 拉取）
+curl -s http://127.0.0.1:8317/v1/models \
+  -H "Authorization: Bearer <你在 CPA 配的 api_key>" | python3 -m json.tool
+
+# 调用（model 填上面列出的原生模型名）
+curl -N http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer <你在 CPA 配的 api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<WorkBuddy 的模型名>","stream":true,
+       "messages":[{"role":"user","content":"你好"}]}'
+```
+
+### 排障
+
+| 现象 | 原因 |
+|---|---|
+| `/v1/models` 返回 401 | 你没带 CPA 的 api_key。把 `allow_no_key` 设为 `true`，或用 `-H "Authorization: Bearer <api_key>"` |
+| `/v1/models` 返回空数组 | 还没登录 WorkBuddy，或登录后模型目录没拉到（看日志；上游需 2xx + `code==0`） |
+| 401 `invalid_api_key` | 这是**客户端→CPA** 的鉴权，不是上游问题 |
+| 聊天返回上游错误 | 看响应里的 `upstream_status`；401/403 说明 WorkBuddy token 失效，重新登录 |
 
 ---
 
