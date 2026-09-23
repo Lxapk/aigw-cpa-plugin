@@ -314,10 +314,17 @@ func parseWorkBuddyCredentials(raw []byte) (*workBuddyCredentials, error) {
 	return creds, nil
 }
 
-// storageJSON ports a2/b.E(): the exact persisted credential shape, which is
-// what the executor side later reads back through ParseAuth.
+// storageJSON ports a2/b.E(): the persisted credential shape the executor side
+// reads back through ParseAuth.
+//
+// The "type" field is added on top of the original app's shape: CPA derives a
+// credential's provider from metadata["type"] when it loads an auth file
+// (internal/pluginhost/auth_callbacks.go:324), and without it every saved
+// account would be filed under provider "unknown" and never match a
+// codebuddy-model request.
 func (c *workBuddyCredentials) storageJSON() []byte {
 	raw, _ := json.Marshal(map[string]any{
+		"type":         workBuddyProviderKey,
 		"accessToken":  c.AccessToken,
 		"refreshToken": c.RefreshToken,
 		"expiresAt":    c.ExpiresAt,

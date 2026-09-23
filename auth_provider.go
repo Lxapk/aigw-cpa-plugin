@@ -302,20 +302,41 @@ func authRefresh(request []byte) ([]byte, error) {
 
 // saveAuthThroughHost pushes a completed auth record into CPA's auth store.
 //
-// CPA exposes host.auth.save for exactly this purpose; when the host does not
-// implement it (older build, or the plugin running standalone) we degrade
-// gracefully by reporting the error to the caller.
+// The request shape is exactly pluginapi.HostAuthSaveRequest:
+//
+//	{"name": "<file>.json", "json": <credential JSON>}
+//
+// CPA requires the name to end in ".json" and the payload to be a JSON object;
+// the credential's provider is read from its "type" field, which storageJSON
+// supplies.
 func saveAuthThroughHost(auth pluginapi.AuthData) error {
-	_, errCall := callHost("host.auth.save", map[string]any{
-		"Provider":    auth.Provider,
-		"ID":          auth.ID,
-		"FileName":    auth.FileName,
-		"Label":       auth.Label,
-		"StorageJSON": auth.StorageJSON,
-		"Metadata":    auth.Metadata,
-		"Attributes":  auth.Attributes,
+	fileName := strings.TrimSpace(auth.FileName)
+	if fileName == "" {
+		fileName = workBuddyProviderKey + "-" + sanitizeID(auth.ID) + ".json"
+	}
+	if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
+		fileName += ".json"
+	}
+
+	storage := auth.StorageJSON
+	if len(storage) == 0 {
+		storage = []byte(`{"type":"` + workBuddyProviderKey + `"}`)
+	}
+
+	result, errCall := callHost("host.auth.save", map[string]any{
+		"name": fileName,
+		"json": json.RawMessage(storage),
 	})
-	return errCall
+	if errCall != nil {
+		return errCall
+	}
+
+	// CPA reports the physical file it wrote; log it for troubleshooting.
+	var saved pluginapi.HostAuthSaveResponse
+	if errUnmarshal := json.Unmarshal(result, &saved); errUnmarshal == nil {
+		_ = saved
+	}
+	return nil
 }
 
 // sanitizeID makes an auth id safe to use inside a file name.

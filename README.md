@@ -274,6 +274,48 @@ curl -N http://127.0.0.1:8317/v1/chat/completions \
 | `/v1/models` 返回空数组 | 还没登录 WorkBuddy，或登录后模型目录没拉到（看日志；上游需 2xx + `code==0`） |
 | 401 `invalid_api_key` | 这是**客户端→CPA** 的鉴权，不是上游问题 |
 | 聊天返回上游错误 | 看响应里的 `upstream_status`；401/403 说明 WorkBuddy token 失效，重新登录 |
+| **`503 auth_not_found: no auth available (providers=codebuddy, ...)`** | **账号没写进 CPA 的 auth 存储**。见下方「账号落盘」。v0.3.1 已修复两个相关缺陷 |
+
+### 账号落盘（v0.3.1 修复）
+
+`auth_not_found` 表示 CPA 找不到可用于 `codebuddy` 的凭据。v0.3.0 有两个缺陷会导致
+**即使登录成功、账号也进不去**：
+
+| 缺陷 | 后果 | 修复 |
+|---|---|---|
+| `host.auth.save` 字段名用错（传 `FileName`/`StorageJSON`，实际要 `name`/`json`） | CPA 校验失败（`json is required`），**文件根本没写** | 改用 `pluginapi.HostAuthSaveRequest` 的 `name`/`json` |
+| 凭据 JSON 缺 `"type"` 字段 | CPA 从 `metadata["type"]` 判断账号属于哪个 provider，缺失则归为 `unknown`，**永远匹配不到 codebuddy** | storageJSON 补 `"type":"codebuddy"` |
+
+正确的落盘数据长这样：
+
+```json
+{
+  "name": "codebuddy-<uid>.json",
+  "json": {
+    "type": "codebuddy",
+    "accessToken": "...",
+    "refreshToken": "...",
+    "expiresAt": 1893456000,
+    "domain": "cn",
+    "uid": "...",
+    "enterpriseId": "...",
+    "nickname": "..."
+  }
+}
+```
+
+**验证账号是否落盘：**
+
+```bash
+docker exec 你的CPA容器名 ls -la /app/auths/ 2>/dev/null | grep codebuddy
+# 或
+docker exec 你的CPA容器名 find / -name "codebuddy-*.json" 2>/dev/null
+```
+
+看到 `codebuddy-*.json` 就说明账号已就位，此时模型即可正常调用。
+
+> 如果登录时插件无法写盘，登录响应里会带上「写入 CPA 账号存储失败：...」的提示，
+> 凭据仍会返回，便于手动排查。
 
 ---
 
