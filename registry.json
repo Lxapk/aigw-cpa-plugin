@@ -6,7 +6,7 @@
       "name": "AIGW 反向代理",
       "description": "从 AI 聚合网关 0.1.18 移植的反向代理网关",
       "author": "TaiXu",
-      "version": "0.8.5",
+      "version": "0.8.6",
       "repository": "https://github.com/Lxapk/aigw-cpa-plugin",
       "license": "MIT",
       "install": {
@@ -15,14 +15,14 @@
           {
             "goos": "linux",
             "goarch": "amd64",
-            "url": "https://github.com/Lxapk/aigw-cpa-plugin/releases/download/v0.8.5/aigw-reverse-proxy_0.8.5_linux_amd64.zip",
-            "sha256": "dd1064931b1ef1758a809358bbcd1a29d28e3a9f47f140ce53cfc2643de6a1df"
+            "url": "https://github.com/Lxapk/aigw-cpa-plugin/releases/download/v0.8.6/aigw-reverse-proxy_0.8.6_linux_amd64.zip",
+            "sha256": "0b58c9ff9e06b97b9f21fb136927fb24164e448a6a40f05def50e164dd812b85"
           },
           {
             "goos": "linux",
             "goarch": "arm64",
-            "url": "https://github.com/Lxapk/aigw-cpa-plugin/releases/download/v0.8.5/aigw-reverse-proxy_0.8.5_linux_arm64.zip",
-            "sha256": "6d2eb91029a34d3a2e1cd896da8e15e7e9c653f3886adc7a3f7f72d4bc484ec1"
+            "url": "https://github.com/Lxapk/aigw-cpa-plugin/releases/download/v0.8.6/aigw-reverse-proxy_0.8.6_linux_arm64.zip",
+            "sha256": "69e749a646a25e044905a435fddb56b05154aea3595f1637f999c3e7225d8246"
           }
         ]
       }
