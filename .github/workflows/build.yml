@@ -148,38 +148,55 @@ jobs:
             registry.json
           generate_release_notes: true
 
-      # 自检：CPA 的 FetchReleaseByTag 解析 /releases/tags/<tag> 的内嵌 assets 字段。
-      # 该字段在 GitHub 侧偶尔会滞后甚至为空（实测本仓库曾出现 assets=0 而
-      # /releases/{id}/assets 正常的情况），一旦为空插件就会报
-      # "release asset ... not found"。这里发现问题就明确失败，避免发布出一个
-      # 装不上的版本。
-      - name: Verify release assets are visible to CPA
+      # 自检：确认资产确实挂到了这个 Release 上。
+      #
+      # 注意检查方式的局限：GitHub 内部（CI 里）与公网看到的
+      # /releases/tags/<tag> 内嵌 assets 字段可能不一致 —— 实测本仓库曾出现
+      # CI 自检通过（内网可见 4 个）而公网查询恒为 0 的情况，此时 CPA 的
+      # FetchReleaseByTag 会报 "release asset ... not found"。
+      # 因此这里以 /releases/{id}/assets 为准判断「资产有没有上传成功」，
+      # 并额外记录 tags 端点的读数，便于事后区分两类故障：
+      #   资产缺失        -> 本步骤失败
+      #   GitHub 索引异常 -> 本步骤通过，但 tags 端点读数为 0（会打警告）
+      - name: Verify release assets uploaded
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          ok=0
+
+          id=""
           for attempt in 1 2 3 4 5 6; do
-            count=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
-              --jq '.assets | length' 2>/dev/null || echo 0)
-            echo "attempt ${attempt}: /releases/tags/${TAG} reports ${count} asset(s)"
-            if [[ "${count}" -ge 3 ]]; then ok=1; break; fi
+            id=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' 2>/dev/null || echo '')
+            [[ -n "${id}" ]] && break
+            echo "attempt ${attempt}: release ${TAG} not found yet, retrying…"
             sleep 15
           done
-          if [[ "${ok}" != "1" ]]; then
-            # Report the discrepancy so the cause is unambiguous.
-            id=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' || echo '')
-            if [[ -n "${id}" ]]; then
-              real=$(gh api "repos/${{ github.repository }}/releases/${id}/assets" --jq 'length' || echo 0)
-              echo "::error::release ${TAG} exposes ${real} asset(s) via /releases/{id}/assets but 0 via /releases/tags/${TAG}; CPA cannot install it"
-            else
-              echo "::error::release ${TAG} is not visible by tag at all"
-            fi
+          if [[ -z "${id}" ]]; then
+            echo "::error::release ${TAG} is not visible by tag at all"
             exit 1
           fi
-          echo "release ${TAG} is visible to CPA with ${count} asset(s)"
+
+          real=""
+          for attempt in 1 2 3 4 5 6; do
+            real=$(gh api "repos/${{ github.repository }}/releases/${id}/assets" --jq 'length' 2>/dev/null || echo 0)
+            echo "attempt ${attempt}: /releases/${id}/assets reports ${real} asset(s)"
+            [[ "${real}" -ge 3 ]] && break
+            sleep 10
+          done
+          if [[ "${real}" -lt 3 ]]; then
+            echo "::error::only ${real} asset(s) attached to release ${TAG}; expected at least 3"
+            exit 1
+          fi
+
+          # Informational: the tag-scoped endpoint is what CPA reads.
+          tagCount=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets | length' 2>/dev/null || echo 0)
+          echo "informational: /releases/tags/${TAG} reports ${tagCount} asset(s)"
+          if [[ "${tagCount}" == "0" ]]; then
+            echo "::warning::/releases/tags/${TAG} reports 0 assets while ${real} are attached. CPA's tag-based install will fail; install without pinning a version (latest) or publish under a fresh tag."
+          fi
+          echo "release ${TAG}: ${real} asset(s) attached"
 
       # 关键：把 registry.json 提交回默认分支，让 raw 链接恒定可用。
       #
