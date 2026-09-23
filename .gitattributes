@@ -1,0 +1,16 @@
+# 统一换行符，避免 Windows 检出时把 shell/python/YAML 脚本转成 CRLF，
+# 否则 CI 会报 "bad interpreter: /bin/bash^M" 或 YAML 解析错误。
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.go   text eol=lf
+*.mod  text eol=lf
+*.sum  text eol=lf
+*.md   text eol=lf
+
+# .so 等二进制不做换行转换
+*.so   binary
+*.zip  binary

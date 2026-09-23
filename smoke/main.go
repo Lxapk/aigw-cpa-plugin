@@ -1,0 +1,321 @@
+// Command smoke loads dist/aigw-reverse-proxy.so through the same C ABI surface
+// CLIProxyAPI's pluginhost uses (dlopen + cliproxy_plugin_init) and replays a
+// real RPC conversation against it.
+//
+// It is the end-to-end proof that the produced shared library is loadable and
+// speaks the host protocol, independent of the Go unit tests.
+package main
+
+/*
+#cgo LDFLAGS: -ldl
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+typedef struct {
+	void* ptr;
+	size_t len;
+} cliproxy_buffer;
+
+typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
+typedef void (*cliproxy_host_free_fn)(void*, size_t);
+
+typedef struct {
+	uint32_t abi_version;
+	void* host_ctx;
+	cliproxy_host_call_fn call;
+	cliproxy_host_free_fn free_buffer;
+} cliproxy_host_api;
+
+typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
+typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
+typedef void (*cliproxy_plugin_shutdown_fn)(void);
+
+typedef struct {
+	uint32_t abi_version;
+	cliproxy_plugin_call_fn call;
+	cliproxy_plugin_free_fn free_buffer;
+	cliproxy_plugin_shutdown_fn shutdown;
+} cliproxy_plugin_api;
+
+typedef int (*init_fn)(cliproxy_host_api*, cliproxy_plugin_api*);
+
+// C-side trampolines. cgo cannot invoke a function pointer held in a struct
+// field, so every indirect call goes through these.
+static int call_init(void* fn, cliproxy_host_api* host, cliproxy_plugin_api* plugin) {
+	return ((init_fn)fn)(host, plugin);
+}
+static int call_plugin(cliproxy_plugin_api* api, char* method, uint8_t* req, size_t reqLen, cliproxy_buffer* resp) {
+	return api->call(method, req, reqLen, resp);
+}
+static void free_plugin_buffer(cliproxy_plugin_api* api, void* ptr, size_t len) {
+	api->free_buffer(ptr, len);
+}
+static void call_shutdown(cliproxy_plugin_api* api) {
+	api->shutdown();
+}
+*/
+import "C"
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"unsafe"
+)
+
+// hostCall documents the host callback signature the plugin may invoke. This
+// smoke test wires a callback-less host (nil function pointers), which the
+// plugin tolerates because none of the exercised code paths emit host RPCs.
+func main() {
+	libPath := "dist/aigw-reverse-proxy.so"
+	if len(os.Args) > 1 {
+		libPath = os.Args[1]
+	}
+
+	cPath := C.CString(libPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	handle := C.dlopen(cPath, C.RTLD_NOW|C.RTLD_LOCAL)
+	if handle == nil {
+		die("dlopen failed: %s", C.GoString(C.dlerror()))
+	}
+	defer C.dlclose(handle)
+	ok("dlopen %s", libPath)
+
+	initSym := C.CString("cliproxy_plugin_init")
+	defer C.free(unsafe.Pointer(initSym))
+	initPtr := C.dlsym(handle, initSym)
+	if initPtr == nil {
+		die("dlsym cliproxy_plugin_init failed: %s", C.GoString(C.dlerror()))
+	}
+
+	// The plugin performs no host callbacks on the code paths exercised here, so
+	// a host API table with no function pointers is sufficient and matches how
+	// pluginhost tolerates a callback-less host.
+	var host C.cliproxy_host_api
+	host.abi_version = 1
+	host.host_ctx = nil
+	host.call = nil
+	host.free_buffer = nil
+
+	var plugin C.cliproxy_plugin_api
+	rc := C.call_init(initPtr, &host, &plugin)
+	if rc != 0 {
+		die("cliproxy_plugin_init returned %d", int(rc))
+	}
+	ok("cliproxy_plugin_init -> 0 (abi_version=%d)", uint32(plugin.abi_version))
+	if plugin.call == nil || plugin.free_buffer == nil || plugin.shutdown == nil {
+		die("plugin ABI table incomplete: call=%v free=%v shutdown=%v", plugin.call, plugin.free_buffer, plugin.shutdown)
+	}
+
+	// --- 1. register --------------------------------------------------
+	regResp := call(plugin, "plugin.register", json.RawMessage(`{"schema_version":6,"config_yaml":"cG9ydDogOTEwMAphcGlfa2V5OiBzay1zbW9rZQphbGxvd19ub19rZXk6IGZhbHNlCmRlZmF1bHRfcHJvdmlkZXI6IHRyYWUK"}`))
+	assertOK(regResp, "plugin.register")
+	var reg struct {
+		SchemaVersion uint32 `json:"schema_version"`
+		Metadata      struct {
+			Name         string `json:"Name"`
+			Version      string `json:"Version"`
+			ConfigFields []any  `json:"ConfigFields"`
+		} `json:"metadata"`
+		Capabilities map[string]any `json:"capabilities"`
+	}
+	mustUnmarshal(regResp.Result, &reg)
+	if len(reg.Metadata.ConfigFields) != 15 {
+		die("expected 15 config fields, got %d", len(reg.Metadata.ConfigFields))
+	}
+	ok("registered %s v%s (schema=%d, config_fields=%d)", reg.Metadata.Name, reg.Metadata.Version, reg.SchemaVersion, len(reg.Metadata.ConfigFields))
+	for _, cap := range []string{"frontend_auth_provider", "request_interceptor", "response_interceptor", "response_stream_interceptor", "usage_plugin", "management_api"} {
+		if v, present := reg.Capabilities[cap]; !present || v != true {
+			die("capability %q not declared: %v", cap, reg.Capabilities)
+		}
+	}
+	ok("all expected capabilities declared")
+
+	// --- 2. frontend auth: no key must be rejected (allow_no_key=false) --
+	authResp := call(plugin, "frontend_auth.authenticate", json.RawMessage(`{"Method":"POST","Path":"/v1/chat/completions"}`))
+	if authResp.OK {
+		die("frontend_auth.authenticate should have rejected a keyless request")
+	}
+	if authResp.Error == nil || authResp.Error.Code != "invalid_api_key" {
+		die("unexpected auth error: %+v", authResp.Error)
+	}
+	ok("keyless request rejected: %s (%d)", authResp.Error.Code, authResp.Error.HTTPStatus)
+
+	// --- 3. frontend auth: correct key must pass ------------------------
+	authResp = call(plugin, "frontend_auth.authenticate", json.RawMessage(`{"Method":"POST","Path":"/v1/chat/completions","Headers":{"Authorization":["Bearer sk-smoke"]}}`))
+	assertOK(authResp, "frontend_auth.authenticate(correct key)")
+	var authOut struct {
+		Authenticated bool `json:"authenticated"`
+	}
+	mustUnmarshal(authResp.Result, &authOut)
+	if !authOut.Authenticated {
+		die("correct key was not authenticated")
+	}
+	ok("correct key authenticated")
+
+	// --- 4. request interception: provider routing + model rewrite ------
+	reqResp := call(plugin, "request.intercept_before", json.RawMessage(`{"RequestID":"smoke-1","Body":"eyJtb2RlbCI6Im9wZW5haS9ncHQtNG8iLCJzdHJlYW0iOnRydWV9","Metadata":{"providers":["trae","openai"]}}`))
+	assertOK(reqResp, "request.intercept_before")
+	var intercepted struct {
+		Terminate bool        `json:"Terminate"`
+		Body      []byte      `json:"Body"`
+		Headers   interface{} `json:"Headers"`
+	}
+	mustUnmarshal(reqResp.Result, &intercepted)
+	if intercepted.Terminate {
+		die("request should not have been terminated")
+	}
+	var rewritten map[string]any
+	if errUnmarshal := json.Unmarshal(intercepted.Body, &rewritten); errUnmarshal != nil {
+		die("rewritten body is not JSON: %v (%s)", errUnmarshal, intercepted.Body)
+	}
+	if rewritten["model"] != "gpt-4o" {
+		die("model not rewritten to bare name: got %v (body=%s)", rewritten["model"], intercepted.Body)
+	}
+	if rewritten["stream"] != true {
+		die("stream flag lost: %s", intercepted.Body)
+	}
+	ok("routed openai/gpt-4o -> provider=openai model=gpt-4o (prefix stripped, stream preserved)")
+
+	// --- 5. response interception: usage accounting ---------------------
+	respResp := call(plugin, "response.intercept_after", json.RawMessage(`{"RequestID":"smoke-1","StatusCode":200,"Model":"gpt-4o","RequestedModel":"openai/gpt-4o","RequestHeaders":{"X-Aigw-Provider":["openai"],"X-Aigw-Auth-Id":["acc-smoke"]},"Body":"eyJjaG9pY2VzIjpbeyJtZXNzYWdlIjp7ImNvbnRlbnQiOiJoaSJ9fV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjEyLCJjb21wbGV0aW9uX3Rva2VucyI6NywidG90YWxfdG9rZW5zIjoxOX19"}`))
+	assertOK(respResp, "response.intercept_after")
+	ok("response intercepted and recorded")
+
+	// --- 6. stream chunk interception ----------------------------------
+	streamResp := call(plugin, "response.intercept_stream_chunk", json.RawMessage(`{"RequestID":"smoke-2","ChunkIndex":0,"Model":"gpt-4o","RequestHeaders":{"X-Aigw-Provider":["openai"]}}`))
+	assertOK(streamResp, "response.intercept_stream_chunk(header init)")
+	ok("stream header-init accepted")
+
+	// --- 7. usage hook -------------------------------------------------
+	usageResp := call(plugin, "usage.handle", json.RawMessage(`{"Provider":"openai","Model":"gpt-4o","AuthIndex":"acc-smoke","Stream":true,"RequestedAt":"2026-09-23T04:00:00Z","Latency":1500000000,"Detail":{"InputTokens":12,"OutputTokens":7,"TotalTokens":19}}`))
+	assertOK(usageResp, "usage.handle")
+	ok("usage recorded")
+
+	// --- 8. management status ------------------------------------------
+	mgmtResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/status","Headers":{"Accept":["application/json"]}}`))
+	assertOK(mgmtResp, "management.handle")
+	var mgmt struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(mgmtResp.Result, &mgmt)
+	if mgmt.StatusCode != 200 {
+		die("management status code = %d", mgmt.StatusCode)
+	}
+	var statusDoc struct {
+		Plugin struct {
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			PortOwned bool   `json:"port_owned_by_cpa"`
+		} `json:"plugin"`
+		Settings struct {
+			Port            int    `json:"port"`
+			APIKey          string `json:"api_key"`
+			DefaultProvider string `json:"default_provider"`
+		} `json:"settings"`
+		Usage struct {
+			TotalCalls      int64 `json:"total_calls"`
+			TotalPrompt     int64 `json:"total_prompt_tokens"`
+			TotalCompletion int64 `json:"total_completion_tokens"`
+		} `json:"usage"`
+		Accounts []struct {
+			Provider  string `json:"provider"`
+			UID       string `json:"uid"`
+			Successes int64  `json:"successes"`
+		} `json:"accounts"`
+	}
+	mustUnmarshal(mgmt.Body, &statusDoc)
+	if statusDoc.Settings.APIKey != "[REDACTED]" {
+		die("api_key must be redacted in status output, got %q", statusDoc.Settings.APIKey)
+	}
+	if statusDoc.Settings.Port != 9100 {
+		die("port from config_yaml not applied: got %d, want 9100", statusDoc.Settings.Port)
+	}
+	if statusDoc.Usage.TotalCalls != 2 {
+		die("usage total_calls = %d, want 2", statusDoc.Usage.TotalCalls)
+	}
+	if statusDoc.Usage.TotalPrompt != 24 || statusDoc.Usage.TotalCompletion != 14 {
+		die("usage tokens = %d/%d, want 24/14", statusDoc.Usage.TotalPrompt, statusDoc.Usage.TotalCompletion)
+	}
+	ok("status: port=%d default_provider=%s api_key=%s calls=%d tokens=%d/%d accounts=%d",
+		statusDoc.Settings.Port, statusDoc.Settings.DefaultProvider, statusDoc.Settings.APIKey, statusDoc.Usage.TotalCalls,
+		statusDoc.Usage.TotalPrompt, statusDoc.Usage.TotalCompletion, len(statusDoc.Accounts))
+
+	// --- 9. shutdown ----------------------------------------------------
+	C.call_shutdown(&plugin)
+	ok("cliproxy_plugin_shutdown returned cleanly")
+
+	fmt.Println()
+	fmt.Println("SMOKE TEST PASSED — the .so loads via dlopen and speaks the CPA plugin ABI.")
+}
+
+// call invokes one RPC through the loaded plugin's ABI table.
+func call(plugin C.cliproxy_plugin_api, method string, payload json.RawMessage) envelope {
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+
+	var reqPtr *C.uint8_t
+	if len(payload) > 0 {
+		reqPtr = (*C.uint8_t)(C.CBytes(payload))
+		defer C.free(unsafe.Pointer(reqPtr))
+	}
+
+	var buf C.cliproxy_buffer
+	rc := C.call_plugin(&plugin, cMethod, reqPtr, C.size_t(len(payload)), &buf)
+	if buf.ptr != nil {
+		defer C.free_plugin_buffer(&plugin, buf.ptr, buf.len)
+	}
+	if rc != 0 {
+		die("%s: plugin call returned %d", method, int(rc))
+	}
+	if buf.ptr == nil {
+		die("%s: empty response buffer", method)
+	}
+	raw := C.GoBytes(buf.ptr, C.int(buf.len))
+
+	var env envelope
+	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal != nil {
+		die("%s: bad envelope %s: %v", method, raw, errUnmarshal)
+	}
+	fmt.Fprintf(os.Stderr, "  [rpc ] %-36s ok=%v\n", method, env.OK)
+	return env
+}
+
+type envelope struct {
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *struct {
+		Code       string `json:"code"`
+		Message    string `json:"message"`
+		HTTPStatus int    `json:"http_status"`
+	} `json:"error,omitempty"`
+}
+
+func assertOK(env envelope, what string) {
+	if !env.OK {
+		if env.Error != nil {
+			die("%s failed: %s: %s", what, env.Error.Code, env.Error.Message)
+		}
+		die("%s failed: not ok", what)
+	}
+}
+
+func mustUnmarshal(raw json.RawMessage, out any) {
+	if errUnmarshal := json.Unmarshal(raw, out); errUnmarshal != nil {
+		die("unmarshal %s: %v", raw, errUnmarshal)
+	}
+}
+
+func ok(format string, args ...any) {
+	fmt.Printf("  ✓ "+format+"\n", args...)
+}
+
+func die(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "  ✗ "+format+"\n", args...)
+	os.Exit(1)
+}

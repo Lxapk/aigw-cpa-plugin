@@ -1,0 +1,268 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+)
+
+const (
+	pluginName    = "aigw-reverse-proxy"
+	pluginVersion = "0.1.0"
+	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
+	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
+)
+
+// envelope is the CPA RPC envelope:
+//
+//	{"ok":true,"result":{...}}  |  {"ok":false,"error":{"code","message","http_status"}}
+type envelope struct {
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *envelopeError  `json:"error,omitempty"`
+}
+
+type envelopeError struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+// errorEnvelope builds a failure envelope. httpStatus defaults to 500 the same
+// way CPA's pluginabi.NewErrorEnvelope treats a zero status.
+func errorEnvelope(code, message string, httpStatus int) []byte {
+	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{
+		Code:       code,
+		Message:    message,
+		HTTPStatus: httpStatus,
+	}})
+	return raw
+}
+
+// okEnvelope wraps a value in the CPA success envelope.
+func okEnvelope(v any) ([]byte, error) {
+	raw, errMarshal := json.Marshal(v)
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+	return json.Marshal(envelope{OK: true, Result: json.RawMessage(raw)})
+}
+
+// identifierResponse answers every *.identifier method.
+type identifierResponse struct {
+	Identifier string `json:"identifier"`
+}
+
+// registration mirrors pluginhost.rpcRegistration.
+type registration struct {
+	SchemaVersion uint32           `json:"schema_version"`
+	Metadata      pluginapi.Metadata `json:"metadata"`
+	Capabilities  registrationCaps `json:"capabilities"`
+}
+
+// registrationCaps mirrors pluginhost.rpcCapabilities. Only the fields this
+// plugin sets are declared; the rest default to false/empty.
+type registrationCaps struct {
+	FrontendAuthProvider          bool   `json:"frontend_auth_provider"`
+	FrontendAuthProviderExclusive bool   `json:"frontend_auth_provider_exclusive"`
+	RequestInterceptor            bool   `json:"request_interceptor"`
+	ResponseInterceptor           bool   `json:"response_interceptor"`
+	StreamChunkInterceptor        bool   `json:"response_stream_interceptor"`
+	UsagePlugin                   bool   `json:"usage_plugin"`
+	ManagementAPI                 bool   `json:"management_api"`
+}
+
+// managementRegistrationResponse mirrors pluginhost.rpcManagementRegistrationResponse.
+type managementRegistrationResponse struct {
+	Routes    []pluginapi.ManagementRoute `json:"routes,omitempty"`
+	Resources []pluginapi.ResourceRoute   `json:"resources,omitempty"`
+}
+
+// handleMethod dispatches one CPA RPC call.
+func handleMethod(method string, request []byte) ([]byte, error) {
+	switch method {
+
+	// ---- lifecycle ----------------------------------------------------
+	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		var req lifecycleRequest
+		if len(request) > 0 {
+			if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+		}
+		if errDecode := state.settings.decodeLifecycleConfig(req.ConfigYAML); errDecode != nil {
+			return nil, errDecode
+		}
+		return okEnvelope(buildRegistration())
+
+	case pluginabi.MethodPluginQuiesce:
+		// Acknowledge: nothing to drain, CPA owns the request lifecycle.
+		return okEnvelope(map[string]any{})
+
+	case pluginabi.MethodPluginShutdown:
+		shutdownPlugin()
+		return okEnvelope(map[string]any{})
+
+	// ---- frontend auth (port of V1/o.j) -------------------------------
+	case pluginabi.MethodFrontendAuthIdentifier:
+		return okEnvelope(identifierResponse{Identifier: pluginName})
+
+	case pluginabi.MethodFrontendAuthAuthenticate:
+		return frontendAuth(request)
+
+	// ---- request interception (port of V1/o.k steps 6-8) --------------
+	case pluginabi.MethodRequestInterceptBefore:
+		return interceptRequest(request, false)
+
+	case pluginabi.MethodRequestInterceptAfter:
+		return interceptRequest(request, true)
+
+	// ---- response / stream interception (failure classification) ------
+	case pluginabi.MethodResponseInterceptAfter:
+		return interceptResponse(request)
+
+	case pluginabi.MethodResponseInterceptStreamChunk:
+		return interceptStreamChunk(request)
+
+	// ---- usage accounting (port of V1/o.r) ---------------------------
+	case pluginabi.MethodUsageHandle:
+		return handleUsage(request)
+
+	// ---- management API (port of V1.s + A0.s status surface) ---------
+	case pluginabi.MethodManagementRegister:
+		return okEnvelope(managementRegistration())
+
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
+
+	default:
+		return errorEnvelope("unknown_method", "unknown method: "+method, http.StatusNotImplemented), nil
+	}
+}
+
+func buildRegistration() registration {
+	return registration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata: pluginapi.Metadata{
+			Name:             pluginName,
+			Version:          pluginVersion,
+			Author:           pluginAuthor,
+			GitHubRepository: pluginRepo,
+			ConfigFields: []pluginapi.ConfigField{
+				{Name: "port", Type: pluginapi.ConfigFieldTypeInteger, Description: "Original gateway listen port (reported for parity; CPA owns the listener)."},
+				{Name: "api_key", Type: pluginapi.ConfigFieldTypeString, Description: "Client bearer token required on inbound requests (V1/o.j)."},
+				{Name: "allow_no_key", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Allow requests without an Authorization header (V1/s.allowNoKey)."},
+				{Name: "expose_lan", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reported for parity (V1/s.exposeLan)."},
+				{Name: "only_usable_models", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Hide models whose provider marks them unavailable (V1/s.onlyUsableModels)."},
+				{Name: "refresh_skew_seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Refresh credentials this far ahead of expiry (V1/s.refreshSkewSeconds)."},
+				{Name: "max_rotate", Type: pluginapi.ConfigFieldTypeInteger, Description: "Maximum credential rotations per request (V1/s.maxRotate)."},
+				{Name: "quota_cooldown_millis", Type: pluginapi.ConfigFieldTypeInteger, Description: "Hard cooldown after an auth/rate/quota rejection (V1/s.quotaCooldownMillis)."},
+				{Name: "soft_cooldown_millis", Type: pluginapi.ConfigFieldTypeInteger, Description: "Soft cooldown after a transient failure (V1/s.softCooldownMillis)."},
+				{Name: "error_threshold", Type: pluginapi.ConfigFieldTypeInteger, Description: "Consecutive failures before parking a credential (V1/s.errorThreshold)."},
+				{Name: "error_cooldown_millis", Type: pluginapi.ConfigFieldTypeInteger, Description: "Park duration once error_threshold is reached (V1/s.errorCooldownMillis)."},
+				{Name: "log_retention_days", Type: pluginapi.ConfigFieldTypeInteger, Description: "Retention window for the call log (V1/s.logRetentionDays)."},
+				{Name: "default_provider", Type: pluginapi.ConfigFieldTypeString, Description: "Provider used when the model carries no \"provider/model\" prefix (V1/s.defaultProvider)."},
+				{Name: "enforce_default_provider", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reject models that address a provider other than default_provider."},
+				{Name: "debug", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Emit verbose plugin logging."},
+			},
+		},
+		Capabilities: registrationCaps{
+			FrontendAuthProvider:          true,
+			FrontendAuthProviderExclusive: false,
+			RequestInterceptor:            true,
+			ResponseInterceptor:           true,
+			StreamChunkInterceptor:        true,
+			UsagePlugin:                   true,
+			ManagementAPI:                 true,
+		},
+	}
+}
+
+// upstreamError classifies an upstream failure into the same buckets the app
+// used (Y1.j: auth / rate / quota / transient) so the credential pool applies
+// the matching cooldown.
+type upstreamError struct {
+	Kind       failureKind
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+// classifyUpstream ports the status handling in V1/o.k():
+//
+//	c.p() >= 400 -> V1.o.l(400, "upstream_rejected", body) and V1.k.c(...)
+//
+// OpenAI/Anthropic gateways surface the semantic class in the body, so the
+// status code alone is not enough.
+func classifyUpstream(statusCode int, body []byte) upstreamError {
+	err := upstreamError{StatusCode: statusCode, Kind: failureTransient}
+
+	var doc struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &doc)
+	}
+	err.Message = strings.TrimSpace(doc.Error.Message)
+	err.Code = strings.TrimSpace(doc.Error.Code)
+	errType := strings.ToLower(strings.TrimSpace(doc.Error.Type))
+	errCode := strings.ToLower(err.Code)
+
+	switch {
+	case statusCode == http.StatusUnauthorized, statusCode == http.StatusForbidden,
+		errType == "authentication_error", errType == "permission_error",
+		errCode == "invalid_api_key", errCode == "unauthorized":
+		err.Kind = failureAuth
+
+	case statusCode == http.StatusTooManyRequests,
+		errType == "rate_limit_error", errCode == "rate_limit_exceeded":
+		err.Kind = failureRate
+
+	case errType == "insufficient_quota", errCode == "insufficient_quota",
+		errType == "billing_error", errCode == "quota_exceeded":
+		err.Kind = failureQuota
+
+	case statusCode >= 500:
+		err.Kind = failureTransient
+	}
+
+	if err.Message == "" {
+		err.Message = http.StatusText(statusCode)
+	}
+	return err
+}
+
+// statusForKind maps a failure class to the downstream HTTP status, matching
+// the APK's error envelope codes (400 upstream_rejected, 503 no_healthy_account).
+func statusForKind(k failureKind) int {
+	switch k {
+	case failureAuth:
+		return http.StatusUnauthorized
+	case failureRate:
+		return http.StatusTooManyRequests
+	case failureQuota:
+		return http.StatusForbidden
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+// logf forwards a diagnostic line to the CPA host log (pluginabi.MethodHostLog).
+// It is intentionally fire-and-forget: the host may not expose the callback.
+func logf(format string, _ ...any) {
+	_ = format
+}
+
+// recordingEnabled reports whether the plugin should record a call.
+func recordingEnabled() bool { return true }
+
+func nowUTC() time.Time { return time.Now().UTC() }
