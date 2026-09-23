@@ -384,14 +384,17 @@ func main() {
 
 	var sawCheckin bool
 	for _, r := range mgmtRegOut.Resources {
-		if r.Path == "/checkin" {
-			sawCheckin = true
+		// The combined page is the only resource; check-in lives behind its tab.
+		sawHome := false
+		for _, r := range mgmtRegOut.Resources {
+			if r.Path == "home" {
+				sawHome = true
 		}
 	}
-	if !sawCheckin {
-		die("check-in resource not registered: %+v", mgmtRegOut.Resources)
+	if !sawHome {
+		die("combined home resource not registered: %+v", mgmtRegOut.Resources)
 	}
-	ok("check-in resource registered (%d resources)", len(mgmtRegOut.Resources))
+	ok("combined page resource registered (%d resources)", len(mgmtRegOut.Resources))
 
 	// Status endpoint must answer with the expected fields.
 	ckStatus := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/checkin/status","Headers":{"Accept":["application/json"]}}`))
