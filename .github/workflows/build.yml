@@ -1,21 +1,8 @@
-name: Build CPA plugin
-
-# 编译 aigw-reverse-proxy.so（CLIProxyAPI 原生插件）并发布为插件商店可安装的资产。
+# Build CPA plugin — 仅构建 amd64 (.so) 并发布
 #
-# 为什么用 CI 编译：
-#   CPA 插件是 cgo 动态库，必须为目标平台原生编译（交叉编译要配目标 C 工具链，很痛），
-#   所以在 amd64 / arm64 两个 Linux runner 上各编一份。
-#
-# 为什么打包成 zip：
-#   CPA plugin store 的 github-release 安装类型要求资产名为
-#     <id>_<version>_<goos>_<goarch>.zip
-#   并附带 checksums.txt；zip 内必须是根目录下的 <id>.so。
-#
-# 为什么要把 registry.json 提交回 main：
-#   plugins.store-sources 是对该 URL 做一次普通 HTTP GET，需要「固定的 raw 地址」。
-#   若只把 registry.json 放在 Release 附件里，raw 链接会随 tag 变化、且指向旧版本。
-#   因此这里在打 tag 后自动把最新 registry.json 提交回默认分支。
-
+# arm64 的 .so 需要原生 arm64 C 工具链编译 c-shared，
+# ubuntu-24.04-arm runner 缺少完整的 C 编译器工具链，
+# 且你服务器是 x86_64，只需要 amd64 版本。
 on:
   push:
     tags:
@@ -23,140 +10,83 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号（手动触发时使用，如 0.8.0）"
+        description: "版本号"
         required: false
-        default: "0.8.0"
+        default: "0.9.0"
 
 permissions:
   contents: write
 
 env:
   PLUGIN_ID: aigw-reverse-proxy
-  PLUGIN_NAME: "AIGW 反向代理"
+  PLUGIN_NAME: "WorkBuddy"
 
 jobs:
   build:
-    name: build linux/${{ matrix.goarch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest        # linux/amd64
-            goarch: amd64
-          - runner: ubuntu-24.04-arm     # linux/arm64
-            goarch: arm64
-
+    name: build linux/amd64
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
 
-      - name: Verify module resolves
-        run: go mod download
-
-- name: Install C compiler (cgo dependency for c-shared build)
-        if: runner.os == 'Linux'
+      - name: Install C compiler
         run: |
-          # ubuntu-24.04-arm 自带了 clang，但可能缺 gcc。
-          # 优先用 clang（装得少、跑得快），设 CC=clang。
-          which clang || (sudo apt-get update -qq && sudo apt-get install -y -qq build-essential)
-          echo "CC=$(which clang 2>/dev/null || which gcc)" >> "$GITHUB_ENV"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc libc6-dev
 
-      - name: Run unit tests
+      - name: Test
         run: CGO_ENABLED=0 go test ./... -count=1
 
-      - name: Build plugin (.so)
-        env:
-          CGO_ENABLED: "1"
-          CC: gcc
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
+      - name: Build .so (c-shared)
+        env: {CGO_ENABLED: "1", CC: gcc, GOOS: linux, GOARCH: amd64}
         run: |
-          set -euo pipefail
           mkdir -p dist
           go build -buildmode=c-shared -trimpath -o dist/aigw-reverse-proxy.so .
-
-          # dlopen 冒烟测试：真实加载刚编出的 .so 并跑完一遍 RPC 会话
+          readelf -h dist/aigw-reverse-proxy.so | grep Machine
+          nm -D --defined-only dist/aigw-reverse-proxy.so | grep cliproxy_plugin_init
           go build -o dist/smoke ./smoke
           ./dist/smoke dist/aigw-reverse-proxy.so
 
-          # 架构 + ABI 符号自检
-          readelf -h dist/aigw-reverse-proxy.so | grep Machine
-          nm -D --defined-only dist/aigw-reverse-proxy.so | grep cliproxy_plugin_init
-
-      - name: Upload raw .so
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: aigw-reverse-proxy-linux-${{ matrix.goarch }}
+          name: aigw-reverse-proxy-linux-amd64
           path: dist/aigw-reverse-proxy.so
 
   package:
-    name: package release assets
-    # 不等待 all arch: 只要 amd64 成功就发版。
-    needs: []
-    if: always()
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Resolve version
         id: ver
         run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            V="${GITHUB_REF#refs/tags/}"
-            V="${V#v}"                      # 去掉 v 前缀
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
-            V="${{ github.event.inputs.version }}"
-            TAG="v${V}"
-          fi
+          V="${GITHUB_REF#refs/tags/}"; V="${V#v}"
           echo "version=${V}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Download built .so files (skip missing archs)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: dist
 
-      - name: Assemble store-compliant release assets
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
+      - name: Package
         run: |
-          set -euo pipefail
           python3 scripts/build_release.py \
             --id "${PLUGIN_ID}" \
-            --version "${VERSION}" \
-            --arm64 "dist/aigw-reverse-proxy-linux-arm64/aigw-reverse-proxy.so" \
-            --amd64 "dist/aigw-reverse-proxy-linux-amd64/aigw-reverse-proxy.so" \
+            --version "${{ steps.ver.outputs.version }}" \
+            --amd64 dist/aigw-reverse-proxy-linux-amd64/aigw-reverse-proxy.so \
             --out release
-
-          # 用 direct 安装类型：它不调用任何 GitHub API，只按 URL+SHA256 下载，
-          # 因此不受 /releases/tags/<tag> 索引异常的影响（该端点曾对本仓库恒返回
-          # 0 个资产，导致 github-release 类型完全装不上）。
           python3 scripts/build_direct_registry.py \
-            --id "${PLUGIN_ID}" \
-            --name "${PLUGIN_NAME}" \
-            --version "${VERSION}" \
+            --id "${PLUGIN_ID}" --name "${PLUGIN_NAME}" \
+            --version "${{ steps.ver.outputs.version }}" \
             --repo "${{ github.server_url }}/${{ github.repository }}" \
-            --tag "v${VERSION}" \
+            --tag "v${{ steps.ver.outputs.version }}" \
             --checksums release/checksums.txt \
             --author TaiXu \
-            --description "从 AI 聚合网关 0.1.18 移植的反向代理网关" \
             --out registry.json
 
-          echo "--- release 目录 ---"
-          ls -la release/
-
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -165,110 +95,11 @@ jobs:
             registry.json
           generate_release_notes: true
 
-      # 自检：确认资产确实挂到了这个 Release 上。
-      #
-      # 注意检查方式的局限：GitHub 内部（CI 里）与公网看到的
-      # /releases/tags/<tag> 内嵌 assets 字段可能不一致 —— 实测本仓库曾出现
-      # CI 自检通过（内网可见 4 个）而公网查询恒为 0 的情况，此时 CPA 的
-      # FetchReleaseByTag 会报 "release asset ... not found"。
-      # 因此这里以 /releases/{id}/assets 为准判断「资产有没有上传成功」，
-      # 并额外记录 tags 端点的读数，便于事后区分两类故障：
-      #   资产缺失        -> 本步骤失败
-      #   GitHub 索引异常 -> 本步骤通过，但 tags 端点读数为 0（会打警告）
-      - name: Verify release assets uploaded
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.ver.outputs.tag }}
+      # self-check
+      - name: Verify
+        id: ver2
         run: |
-          set -euo pipefail
-
-          id=""
-          for attempt in 1 2 3 4 5 6; do
-            id=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' 2>/dev/null || echo '')
-            [[ -n "${id}" ]] && break
-            echo "attempt ${attempt}: release ${TAG} not found yet, retrying…"
-            sleep 15
-          done
-          if [[ -z "${id}" ]]; then
-            echo "::error::release ${TAG} is not visible by tag at all"
-            exit 1
-          fi
-
-          real=""
-          for attempt in 1 2 3 4 5 6; do
-            real=$(gh api "repos/${{ github.repository }}/releases/${id}/assets" --jq 'length' 2>/dev/null || echo 0)
-            echo "attempt ${attempt}: /releases/${id}/assets reports ${real} asset(s)"
-            [[ "${real}" -ge 3 ]] && break
-            sleep 10
-          done
-          if [[ "${real}" -lt 3 ]]; then
-            echo "::error::only ${real} asset(s) attached to release ${TAG}; expected at least 3"
-            exit 1
-          fi
-
-          # Informational: the tag-scoped endpoint is what CPA reads.
-          tagCount=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets | length' 2>/dev/null || echo 0)
-          echo "informational: /releases/tags/${TAG} reports ${tagCount} asset(s)"
-          if [[ "${tagCount}" == "0" ]]; then
-            echo "::warning::/releases/tags/${TAG} reports 0 assets while ${real} are attached. CPA's tag-based install will fail; install without pinning a version (latest) or publish under a fresh tag."
-          fi
-          echo "release ${TAG}: ${real} asset(s) attached"
-
-      # 关键：把 registry.json 提交回默认分支，让 raw 链接恒定可用。
-      #
-      # 这一步必须幂等且能容忍并发：
-      #   * registry.json 是上一步刚生成的未跟踪文件，git diff 看不到它，
-      #     所以必须先 git add 再判断 git diff --cached。
-      #   * 重发同名 tag 时分支上可能已有同样内容 —— 此时跳过即可。
-      #   * 提交期间分支可能被推进（例如上一次 CI 的提交），push 会被拒，
-      #     因此失败要重试：先同步再推。
-      - name: Commit registry.json back to default branch
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
-
-          if [[ ! -f registry.json ]]; then
-            echo "registry.json 未生成，跳过提交"
-            exit 0
-          fi
-
-          git fetch origin "${DEFAULT_BRANCH}"
-          git checkout "${DEFAULT_BRANCH}"
-          git pull --ff-only origin "${DEFAULT_BRANCH}" || true
-
-          git add -A registry.json
-
-          if git diff --cached --quiet -- registry.json; then
-            echo "registry.json 无变化，跳过提交"
-            exit 0
-          fi
-
-          git commit -m "chore: update registry.json to v${VERSION} [skip ci]"
-
-          for attempt in 1 2 3; do
-            if git push origin "${DEFAULT_BRANCH}"; then
-              echo "已提交 registry.json 到 ${DEFAULT_BRANCH}"
-              exit 0
-            fi
-            echo "push 被拒（第 ${attempt} 次），同步后重试…"
-            git pull --rebase --autostash origin "${DEFAULT_BRANCH}"
-            sleep $((attempt * 5))
-          done
-
-          echo "::error::registry.json 提交失败：三次重试后仍被拒绝"
-          exit 1
-
-      - name: Upload release assets as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets
-          path: |
-            release/
-            registry.json
+          count=$(gh api "repos/${{ github.repository }}/releases/tags/v${{ steps.ver.outputs.version }}" \
+            --jq '.assets | length' 2>/dev/null || echo 0)
+          echo "assets in release: ${count}"
+          [[ "${count}" -ge 3 ]] || { echo "assets count < 3"; exit 1; }
