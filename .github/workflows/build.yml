@@ -1,0 +1,183 @@
+name: Build CPA plugin
+
+# 编译 aigw-reverse-proxy.so（CLIProxyAPI 原生插件）并发布为插件商店可安装的资产。
+#
+# 为什么用 CI 编译：
+#   CPA 插件是 cgo 动态库，必须为目标平台原生编译（交叉编译要配目标 C 工具链，很痛），
+#   所以在 amd64 / arm64 两个 Linux runner 上各编一份。
+#
+# 为什么打包成 zip：
+#   CPA plugin store 的 github-release 安装类型要求资产名为
+#     <id>_<version>_<goos>_<goarch>.zip
+#   并附带 checksums.txt；zip 内必须是根目录下的 <id>.so。
+#
+# 为什么要把 registry.json 提交回 main：
+#   plugins.store-sources 是对该 URL 做一次普通 HTTP GET，需要「固定的 raw 地址」。
+#   若只把 registry.json 放在 Release 附件里，raw 链接会随 tag 变化、且指向旧版本。
+#   因此这里在打 tag 后自动把最新 registry.json 提交回 main 分支，
+#   让 https://raw.githubusercontent.com/<owner>/<repo>/main/registry.json 恒定可用。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（手动触发时使用，如 0.1.0）"
+        required: false
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_ID: aigw-reverse-proxy
+  PLUGIN_NAME: "AIGW 反向代理"
+
+jobs:
+  build:
+    name: build linux/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest        # linux/amd64
+            goarch: amd64
+          - runner: ubuntu-24.04-arm     # linux/arm64
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Verify module resolves
+        run: go mod download
+
+      - name: Run unit tests
+        run: CGO_ENABLED=0 go test ./... -count=1
+
+      - name: Build plugin (.so)
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -buildmode=c-shared -trimpath -o dist/${PLUGIN_ID}.so .
+
+          # dlopen 冒烟测试：真实加载刚编出的 .so 并跑完一遍 RPC 会话
+          go build -o dist/smoke ./smoke
+          ./dist/smoke dist/${PLUGIN_ID}.so
+
+          # 架构 + ABI 符号自检
+          readelf -h dist/${PLUGIN_ID}.so | grep Machine
+          nm -D --defined-only dist/${PLUGIN_ID}.so | grep cliproxy_plugin_init
+
+      - name: Upload raw .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: aigw-reverse-proxy-linux-${{ matrix.goarch }}
+          path: dist/aigw-reverse-proxy.so
+
+  package:
+    name: package release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            V="${GITHUB_REF#refs/tags/}"
+            V="${V#v}"                      # 去掉 v 前缀
+          else
+            V="${{ github.event.inputs.version }}"
+          fi
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Download built .so files
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Assemble store-compliant release assets
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build_release.py \
+            --id "${PLUGIN_ID}" \
+            --version "${VERSION}" \
+            --arm64 "dist/${PLUGIN_ID}-linux-arm64/${PLUGIN_ID}.so" \
+            --amd64 "dist/${PLUGIN_ID}-linux-amd64/${PLUGIN_ID}.so" \
+            --out release
+
+          python3 scripts/gen_registry.py \
+            --id "${PLUGIN_ID}" \
+            --name "${PLUGIN_NAME}" \
+            --version "${VERSION}" \
+            --repo "${{ github.server_url }}/${{ github.repository }}" \
+            --author TaiXu \
+            --description "从 AI 聚合网关 0.1.18 移植的反向代理网关" \
+            --out registry.json
+
+          echo "--- release 目录 ---"
+          ls -la release/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.zip
+            release/checksums.txt
+            registry.json
+          generate_release_notes: true
+
+      # 关键：把 registry.json 提交回 main，让 raw 链接恒定可用。
+      # 只在打 tag 时执行；提交时跳过 CI 以免自触发。
+      - name: Commit registry.json back to default branch
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          git fetch origin "${DEFAULT_BRANCH}"
+          git checkout "${DEFAULT_BRANCH}"
+
+          cp registry.json registry.json.new
+          mv registry.json.new registry.json
+
+          if git diff --quiet -- registry.json; then
+            echo "registry.json 无变化，跳过提交"
+            exit 0
+          fi
+
+          git add registry.json
+          git commit -m "chore: update registry.json to v${VERSION} [skip ci]"
+          git push origin "${DEFAULT_BRANCH}"
+          echo "已提交 registry.json 到 ${DEFAULT_BRANCH}"
+
+      - name: Upload release assets as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: |
+            release/
+            registry.json
