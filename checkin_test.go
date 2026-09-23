@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -629,25 +628,19 @@ func TestCheckinConfigEndpointAcceptsNestedShape(t *testing.T) {
 	}
 }
 
-func TestCheckinFormSave(t *testing.T) {
+// TestCheckinConfigViaPostJSON covers the endpoint the page's fetch() uses.
+func TestCheckinConfigViaPostJSON(t *testing.T) {
 	resetState()
-	form := url.Values{
-		"action":   {"save"},
-		"enabled":  {"on"},
-		"hour":     {"8"},
-		"minute":   {"45"},
-		"on_start": {"on"},
-	}
 	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method:  http.MethodPost,
-		Path:    "/v0/resource/plugins/aigw-reverse-proxy/checkin",
-		Headers: http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}},
-		Body:    []byte(form.Encode()),
+		Path:    managementBasePath() + "/" + pluginName + "/checkin/config",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"enabled":true,"hour":8,"minute":45,"on_start":true}`),
 	})
 	var mr managementResponse
 	mustDecode(t, res, &mr)
 	if mr.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", mr.StatusCode)
+		t.Fatalf("status = %d (%s)", mr.StatusCode, mr.Body)
 	}
 	cfg := state.settings.get().Checkin
 	if !cfg.Enabled || cfg.Hour != 8 || cfg.Minute != 45 || !cfg.OnStart {

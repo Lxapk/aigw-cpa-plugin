@@ -62,7 +62,6 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"unsafe"
@@ -430,35 +429,32 @@ func main() {
 			die("check-in page missing %q", want)
 		}
 	}
-	// The form must post to the management mount: CPA serves resource routes
-	// with GET only, so a relative action yields a blank page after submit.
-	wantAction := `action="/v0/management/aigw-reverse-proxy/checkin"`
-	if !strings.Contains(page, wantAction) {
-		die("check-in form must post to %s", wantAction)
+	// The page must not use HTML forms: an HTML form can neither satisfy the
+	// GET-only resource route nor attach the management key header, so it
+	// either blank-pages or fails with "missing management key". The key is
+	// kept in localStorage and sent via fetch() instead.
+	if strings.Contains(page, "<form") {
+		die("check-in page must not use HTML forms")
 	}
-	ok("checkin page renders manual button + auto schedule form (%d bytes)", len(page))
+	for _, want := range []string{"保存到浏览器", "aigw-management-key", "'Authorization': 'Bearer '"} {
+		if !strings.Contains(page, want) {
+			die("check-in page missing %q", want)
+		}
+	}
+	ok("checkin page renders (localStorage key + controls) (%d bytes)", len(page))
 
-	// A form POST to the management path must return a full HTML page, never an
-	// empty body (the "blank screen after clicking" symptom).
-	ckPost := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/checkin","Headers":{"Content-Type":["application/x-www-form-urlencoded"]},"Body":"YWN0aW9uPXNhdmU`+`maG91cj0xMCZtaW51dGU9MTU="}`))
-	assertOK(ckPost, "management.handle(POST /checkin)")
-	var ckPostEnv struct {
-		StatusCode int         `json:"StatusCode"`
-		Headers    http.Header `json:"Headers"`
-		Body       []byte      `json:"Body"`
+	// The config endpoint the page's fetch() calls must work.
+	ckCfg := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/checkin/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJlbmFibGVkIjpmYWxzZSwiaG91ciI6OSwibWludXRlIjowfQ=="}`))
+	assertOK(ckCfg, "management.handle(POST /checkin/config)")
+	var ckCfgEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
 	}
-	mustUnmarshal(ckPost.Result, &ckPostEnv)
-	if ckPostEnv.StatusCode != 200 {
-		die("form POST status = %d", ckPostEnv.StatusCode)
+	mustUnmarshal(ckCfg.Result, &ckCfgEnv)
+	if ckCfgEnv.StatusCode != 200 {
+		die("config POST status = %d", ckCfgEnv.StatusCode)
 	}
-	if len(ckPostEnv.Body) == 0 {
-		die("form POST returned an empty body — the browser would show a blank page")
-	}
-	if !strings.Contains(string(ckPostEnv.Body), "设置已保存") {
-		die("form POST did not render the confirmation banner")
-	}
-	ok("checkin form POST -> %d, %d bytes HTML with confirmation banner",
-		ckPostEnv.StatusCode, len(ckPostEnv.Body))
+	ok("checkin/config -> %d (%d bytes JSON)", ckCfgEnv.StatusCode, len(ckCfgEnv.Body))
 
 	// Triggering a manual run without any host credentials must not crash: the
 	// smoke host implements no host.auth.list, so the run reports the account

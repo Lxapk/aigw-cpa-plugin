@@ -87,7 +87,7 @@ func handleCheckinRequest(req pluginapi.ManagementRequest) (managementResponse, 
 		return managementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    jsonResponseHeaders(),
-			Body:       mustJSON(map[string]any{
+			Body: mustJSON(map[string]any{
 				"ok":      true,
 				"checkin": checkinStatusJSON(),
 			}),
@@ -97,65 +97,27 @@ func handleCheckinRequest(req pluginapi.ManagementRequest) (managementResponse, 
 	return managementResponse{}, false
 }
 
-// handleCheckinPost handles an HTML form submission from the check-in page.
+// handleCheckinPost handles a POST to the check-in management path.
+//
+// The HTML page no longer submits forms (see checkinPageScript), but these
+// endpoints remain for scripts and for the browser's fetch() calls.
 func handleCheckinPost(req pluginapi.ManagementRequest) (managementResponse, bool) {
-	form := parseFormBody(req.Body, req.Headers)
-	action := strings.ToLower(strings.TrimSpace(form.Get("action")))
-
-	switch action {
-	case "run":
-		run := runFromManagement()
+	cfg, errDecode := decodeCheckinConfigBody(req.Body)
+	if errDecode != nil {
 		return managementResponse{
-			StatusCode: http.StatusOK,
-			Headers:    htmlResponseHeaders(),
-			Body:       []byte(checkinPageWithRun(run)),
-		}, true
-
-	case "save":
-		cfg := checkinSettings{
-			Enabled:                  form.Get("enabled") == "on" || form.Get("enabled") == "true",
-			Hour:                     atoiDefault(form.Get("hour"), 9),
-			Minute:                   atoiDefault(form.Get("minute"), 0),
-			OnStart:                  form.Get("on_start") == "on" || form.Get("on_start") == "true",
-			RetryOnDeviceFingerprint: true,
-		}
-		applied := applyCheckinConfig(cfg)
-		if applied.Enabled {
-			startCheckinScheduler()
-		}
-		return managementResponse{
-			StatusCode: http.StatusOK,
-			Headers:    htmlResponseHeaders(),
-			Body:       []byte(checkinPageWithNotice("设置已保存")),
-		}, true
-
-	case "config":
-		// JSON-ish form post from a script.
-		cfg, errDecode := decodeCheckinConfigBody(req.Body)
-		if errDecode != nil {
-			return managementResponse{
-				StatusCode: http.StatusBadRequest,
-				Headers:    jsonResponseHeaders(),
-				Body:       mustJSON(map[string]any{"error": errDecode.Error()}),
-			}, true
-		}
-		applied := applyCheckinConfig(cfg)
-		if applied.Enabled {
-			startCheckinScheduler()
-		}
-		return managementResponse{
-			StatusCode: http.StatusOK,
+			StatusCode: http.StatusBadRequest,
 			Headers:    jsonResponseHeaders(),
-			Body:       mustJSON(map[string]any{"ok": true, "checkin": checkinStatusJSON()}),
+			Body:       mustJSON(map[string]any{"error": errDecode.Error()}),
 		}, true
 	}
-
-	// Unknown/missing action: render the page instead of returning nothing, so
-	// the operator never sees a blank screen.
+	applied := applyCheckinConfig(cfg)
+	if applied.Enabled {
+		startCheckinScheduler()
+	}
 	return managementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    htmlResponseHeaders(),
-		Body:       []byte(checkinPageWithNotice("未识别的操作，已显示当前状态")),
+		Headers:    jsonResponseHeaders(),
+		Body:       mustJSON(map[string]any{"ok": true, "checkin": checkinStatusJSON()}),
 	}, true
 }
 
@@ -225,26 +187,54 @@ func decodeCheckinConfigBody(body []byte) (checkinSettings, error) {
 	return cfg, nil
 }
 
-// managementFormAction returns the absolute POST target for the check-in form.
+// managementFormAction returns the POST target for the check-in form.
 //
-// The browsable page is served from a *resource* route
-// (/v0/resource/plugins/<id>/checkin), and CPA serves resource routes with GET
-// only (internal/pluginhost/management.go:295 rejects anything else). A form
-// action of "checkin" would therefore resolve to a GET-only URL and the POST
-// would be dropped, leaving a blank page.
+// Two constraints collide here:
 //
-// Management routes accept any method and receive the body
-// (internal/pluginhost/management.go:232), so the form must post there.
+//  1. CPA serves *resource* routes with GET only
+//     (internal/pluginhost/management.go:295), so a resource URL cannot accept
+//     a form POST.
+//  2. CPA's *management* routes accept any method but sit behind the
+//     management-key gate (internal/api/handlers/management/handler.go:276),
+//     and an HTML form cannot set the Authorization / X-Management-Key header.
+//
+// A POST from the page therefore always fails one way or the other: either the
+// method is rejected (blank page) or the key is missing ("missing management
+// key").
+//
+// The way out is to keep the submission on the *resource* route and carry the
+// action in the query string, which GET allows:
+//
+//	/v0/resource/plugins/<id>/checkin?action=run
+//
+// The check-in work itself never touches the management API — it reads
+// credentials through the in-process host.auth.* RPC and calls Tencent
+// directly — so no management key is needed for the operation to succeed.
 func managementFormAction() string {
-	return managementBasePath() + "/" + pluginName + "/checkin"
+	return resourceBasePath() + "/" + pluginName + "/checkin"
 }
 
-// managementBasePath mirrors CPA's plugin management mount point.
+// resourceBasePath mirrors CPA's plugin resource mount point.
+func resourceBasePath() string {
+	return "/v0/resource/plugins"
+}
+
+// managementBasePath mirrors CPA's plugin management mount point, kept for the
+// script-friendly JSON endpoints.
 func managementBasePath() string {
 	return "/v0/management"
 }
 
 // ---- HTML ----------------------------------------------------------------
+
+// checkinKeyStorageName is the localStorage key the page uses to keep the
+// operator's CPA management key on their own machine.
+//
+// The key is deliberately never sent to the plugin: the page reads it from
+// localStorage and attaches it as an Authorization header when it calls the
+// management endpoints with fetch(). That keeps the secret out of the plugin's
+// configuration file and out of any server-side log.
+const checkinKeyStorageName = "aigw-management-key"
 
 // checkinPage renders the check-in UI.
 func checkinPage() string {
@@ -280,32 +270,43 @@ func checkinPageWithRun(fresh *checkinRun) string {
 	var b strings.Builder
 	b.WriteString(checkinPageHead())
 
-	// --- auto settings form -------------------------------------------
-	b.WriteString(`<h2>自动签到</h2><form method="post" action="` + managementFormAction() + `" class="card">`)
-	b.WriteString(`<input type="hidden" name="action" value="save">`)
-	b.WriteString(`<label class="row"><input type="checkbox" name="enabled"`)
+	// --- management key (kept in the browser) --------------------------
+	// An HTML form cannot set an Authorization header, and CPA's management
+	// endpoints require one. So the key never leaves the browser: it is stored
+	// in localStorage and attached by fetch() below.
+	b.WriteString(`<h2>管理密钥</h2><div class="card">`)
+	b.WriteString(`<div class="row"><input type="password" id="mgmtKey" placeholder="CPA management key" ` +
+		`style="width:min(420px,70%);padding:5px 8px"> <button type="button" onclick="saveKey()">保存到浏览器</button>` +
+		` <button type="button" onclick="clearKey()">清除</button></div>`)
+	b.WriteString(`<div class="muted" id="keyState"></div>`)
+	b.WriteString(`<div class="muted">密钥仅保存在本机浏览器（localStorage），不会上传到插件或服务器。` +
+		`对应 CPA 配置中的 <code>remote-management.secret-key</code>。</div>`)
+	b.WriteString(`</div>`)
+
+	// --- auto settings -------------------------------------------------
+	b.WriteString(`<h2>自动签到</h2><div class="card">`)
+	b.WriteString(`<label class="row"><input type="checkbox" id="ckEnabled"`)
 	if cfg.Enabled {
 		b.WriteString(` checked`)
 	}
 	b.WriteString(`> 启用每日自动签到</label>`)
-	b.WriteString(`<div class="row">每天 <input type="number" name="hour" min="0" max="23" value="` +
-		fmt.Sprint(clampHour(cfg.Hour)) + `" style="width:4em"> 时 <input type="number" name="minute" min="0" max="59" value="` +
+	b.WriteString(`<div class="row">每天 <input type="number" id="ckHour" min="0" max="23" value="` +
+		fmt.Sprint(clampHour(cfg.Hour)) + `" style="width:4em"> 时 <input type="number" id="ckMinute" min="0" max="59" value="` +
 		fmt.Sprint(clampMinute(cfg.Minute)) + `" style="width:4em"> 分执行</div>`)
-	b.WriteString(`<label class="row"><input type="checkbox" name="on_start"`)
+	b.WriteString(`<label class="row"><input type="checkbox" id="ckOnStart"`)
 	if cfg.OnStart {
 		b.WriteString(` checked`)
 	}
 	b.WriteString(`> 启动时补跑（当天尚未执行时）</label>`)
-	b.WriteString(`<button type="submit">保存设置</button>`)
+	b.WriteString(`<button type="button" onclick="saveConfig()">保存设置</button>`)
 	if next, _ := status["next_run"].(string); next != "" {
 		b.WriteString(`<span class="muted" style="margin-left:12px">下次执行：` + html.EscapeString(next) + `</span>`)
 	}
-	b.WriteString(`</form>`)
+	b.WriteString(`</div>`)
 
 	// --- manual run ----------------------------------------------------
-	b.WriteString(`<h2>手动签到</h2><form method="post" action="` + managementFormAction() + `" class="card">`)
-	b.WriteString(`<input type="hidden" name="action" value="run">`)
-	b.WriteString(`<button type="submit"`)
+	b.WriteString(`<h2>手动签到</h2><div class="card">`)
+	b.WriteString(`<button type="button" id="btnRun" onclick="runCheckin()"`)
 	if running, _ := status["running"].(bool); running {
 		b.WriteString(` disabled`)
 	}
@@ -313,7 +314,9 @@ func checkinPageWithRun(fresh *checkinRun) string {
 	if running, _ := status["running"].(bool); running {
 		b.WriteString(` <span class="muted">已有任务在运行…</span>`)
 	}
-	b.WriteString(`</form>`)
+	b.WriteString(`<div id="runMsg" class="muted"></div>`)
+	b.WriteString(`</div>`)
+	b.WriteString(`<div id="runResult"></div>`)
 
 	// --- fresh run result ---------------------------------------------
 	if fresh != nil {
@@ -330,6 +333,8 @@ func checkinPageWithRun(fresh *checkinRun) string {
 			b.WriteString(renderRun(run))
 		}
 	}
+
+	b.WriteString(checkinPageScript())
 
 	b.WriteString(`</body></html>`)
 	return b.String()
@@ -393,7 +398,9 @@ func checkinPageHead() string {
 		`.card{border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;margin-bottom:12px}` +
 		`.row{display:block;margin:6px 0}` +
 		`button{padding:6px 14px;border-radius:8px;border:1px solid rgba(128,128,128,.4);cursor:pointer}` +
+		`button:disabled{opacity:.5;cursor:default}` +
 		`input[type=number]{padding:3px 6px}` +
+		`input[type=password]{padding:5px 8px;font-family:ui-monospace,Menlo,monospace}` +
 		`</style></head><body>` +
 		`<h1>WorkBuddy 签到</h1>` +
 		`<div class="muted">手动立即签到，或配置每天自动签到。签到接口对应源 APK 的 <code>POST /v2/billing/meter/daily-checkin</code>。</div>`
