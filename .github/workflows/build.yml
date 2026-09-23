@@ -61,7 +61,10 @@ jobs:
 
       - name: Install C compiler (cgo dependency for c-shared build)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc libc6-dev
+          echo "CC=$(which gcc)" >> "$GITHUB_ENV"
 
       - name: Run unit tests
         run: CGO_ENABLED=0 go test ./... -count=1
@@ -69,6 +72,7 @@ jobs:
       - name: Build plugin (.so)
         env:
           CGO_ENABLED: "1"
+          CC: gcc
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: |
