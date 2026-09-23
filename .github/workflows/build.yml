@@ -147,7 +147,7 @@ jobs:
           generate_release_notes: true
 
       # 关键：把 registry.json 提交回 main，让 raw 链接恒定可用。
-      # 只在打 tag 时执行；提交时跳过 CI 以免自触发。
+      # 只在打 tag 时执行；提交信息带 [skip ci] 以免自触发。
       - name: Commit registry.json back to default branch
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -161,15 +161,19 @@ jobs:
           git fetch origin "${DEFAULT_BRANCH}"
           git checkout "${DEFAULT_BRANCH}"
 
-          cp registry.json registry.json.new
-          mv registry.json.new registry.json
+          # 保护 tag 构建期间已被提交的情况：先同步一次远端
+          git pull --ff-only origin "${DEFAULT_BRANCH}" || true
 
-          if git diff --quiet -- registry.json; then
+          # registry.json 由上一步生成在仓库根目录，且尚未被跟踪。
+          # 注意：git diff 看不到未跟踪文件，所以用 git add -N 让 diff 能识别，
+          # 或者直接判断 add 后是否有暂存差异。
+          git add -A registry.json
+
+          if git diff --cached --quiet -- registry.json; then
             echo "registry.json 无变化，跳过提交"
             exit 0
           fi
 
-          git add registry.json
           git commit -m "chore: update registry.json to v${VERSION} [skip ci]"
           git push origin "${DEFAULT_BRANCH}"
           echo "已提交 registry.json 到 ${DEFAULT_BRANCH}"
