@@ -325,7 +325,11 @@ func TestModelForAuthIgnoresForeignProvider(t *testing.T) {
 	}
 }
 
-func TestModelForAuthUnparseableAuthYieldsNothing(t *testing.T) {
+// TestModelForAuthUnparseableAuthYieldsFallback pins the fix for
+// "该凭证暂无可用模型": an unreadable credential body must still report the
+// built-in model list, because CPA shows the "no models" notice for an empty
+// response and the account would look unusable.
+func TestModelForAuthUnparseableAuthYieldsFallback(t *testing.T) {
 	resetState()
 	res := callOK(t, pluginabi.MethodModelForAuth, pluginapi.AuthModelRequest{
 		AuthProvider: workBuddyProviderKey,
@@ -333,8 +337,43 @@ func TestModelForAuthUnparseableAuthYieldsNothing(t *testing.T) {
 	})
 	var out pluginapi.ModelResponse
 	mustDecode(t, res, &out)
-	if len(out.Models) != 0 {
-		t.Fatalf("models = %+v", out.Models)
+	if out.Provider != workBuddyProviderKey {
+		t.Fatalf("provider = %q", out.Provider)
+	}
+	if len(out.Models) == 0 {
+		t.Fatal("an unreadable credential must still report the built-in models")
+	}
+	var sawDeepSeek bool
+	for _, m := range out.Models {
+		if m.ID == "deepseek-v4-flash" {
+			sawDeepSeek = true
+		}
+	}
+	if !sawDeepSeek {
+		t.Fatalf("fallback list missing deepseek-v4-flash: %+v", out.Models)
+	}
+}
+
+// TestModelForAuthFallsBackWhenUpstreamFails keeps a usable credential from
+// looking empty when the live catalogue call fails.
+func TestModelForAuthFallsBackWhenUpstreamFails(t *testing.T) {
+	resetState()
+	// Point the API host at a dead address so listModels fails.
+	orig := copilotHostValue()
+	setCopilotHost("http://127.0.0.1:1")
+	defer setCopilotHost(orig)
+
+	storage, _ := json.Marshal(map[string]any{
+		"type": workBuddyProviderKey, "accessToken": "at", "uid": "u-1", "domain": "cn",
+	})
+	res := callOK(t, pluginabi.MethodModelForAuth, pluginapi.AuthModelRequest{
+		AuthProvider: workBuddyProviderKey,
+		StorageJSON:  storage,
+	})
+	var out pluginapi.ModelResponse
+	mustDecode(t, res, &out)
+	if len(out.Models) == 0 {
+		t.Fatal("a failed live query must fall back to the built-in list")
 	}
 }
 

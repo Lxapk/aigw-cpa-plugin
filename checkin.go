@@ -316,7 +316,7 @@ func startCheckinScheduler() {
 	state.checkin.started = true
 	state.checkin.mu.Unlock()
 
-	go checkinLoop()
+	safeGo("checkin-loop", checkinLoop)
 }
 
 // checkinLoop wakes up periodically and runs the daily check-in when due.

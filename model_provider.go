@@ -146,9 +146,14 @@ func modelForAuth(request []byte) ([]byte, error) {
 
 	creds, errParse := parseWorkBuddyCredentials(req.StorageJSON)
 	if errParse != nil {
-		// A credential we cannot parse yields no models rather than an error,
-		// so the host can keep serving other providers.
-		return okEnvelope(pluginapi.ModelResponse{Provider: workBuddyProviderKey})
+		// The credential body could not be parsed (e.g. the host passed only
+		// metadata). Report the built-in list rather than an empty response:
+		// CPA shows "该凭证暂无可用模型" for an empty list, which hides a
+		// credential that may well work.
+		return okEnvelope(pluginapi.ModelResponse{
+			Provider: workBuddyProviderKey,
+			Models:   modelsToInfo(fallbackModelsCopy()),
+		})
 	}
 
 	cacheKey := creds.AuthKey()
@@ -161,11 +166,13 @@ func modelForAuth(request []byte) ([]byte, error) {
 
 	models, errList := workBuddyUpstream.listModels(context.Background(), creds)
 	if errList != nil {
-		// Surface the failure as an empty catalogue; the host decides how to
-		// report provider-level errors.
-		return okEnvelope(pluginapi.ModelResponse{Provider: workBuddyProviderKey})
+		// A failed live query must not make the credential look empty.
+		models = fallbackModelsCopy()
 	}
-	workBuddyModelCache.put(cacheKey, models)
+	models, usedFallback := modelsOrFallback(models)
+	if !usedFallback {
+		workBuddyModelCache.put(cacheKey, models)
+	}
 
 	return okEnvelope(pluginapi.ModelResponse{
 		Provider: workBuddyProviderKey,

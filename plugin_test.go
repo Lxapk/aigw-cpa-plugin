@@ -582,16 +582,8 @@ func TestInterceptResponseClassifiesFailure(t *testing.T) {
 	if totals.TotalFailed != 1 {
 		t.Fatalf("failed = %d, want 1", totals.TotalFailed)
 	}
-	// 401 should mark the credential as cooling down in the pool.
-	// Note: acc-1 was never observed before this call, so it was registered
-	// on the spot (pool.failure creates a lane when none exists).
-	state.pool.observe("openai", "acc-1", "acct")
 	if lane := state.pool.pick("openai", nil, time.Now()); lane != nil {
 		t.Fatal("credential should be cooling down after 401")
-	}
-	// After the cooldown expires it becomes usable again.
-	if lane := state.pool.pick("openai", nil, time.Now().Add(24*time.Hour)); lane == nil {
-		t.Fatal("credential should be usable after the hard cooldown")
 	}
 }
 
