@@ -3,10 +3,10 @@
   "plugins": [
     {
       "id": "aigw-reverse-proxy",
-      "name": "AIGW 反向代理",
-      "description": "从 AI 聚合网关 0.1.18 移植的反向代理网关",
+      "name": "WorkBuddy",
+      "description": "把 WorkBuddy 账号反代为 CPA 的 OpenAI 兼容接口：账号轮换、模型输出、签到与积分管理。",
       "author": "TaiXu",
-      "version": "0.8.6",
+      "version": "0.9.0",
       "repository": "https://github.com/Lxapk/aigw-cpa-plugin",
       "license": "MIT",
       "install": {
@@ -15,14 +15,8 @@
           {
             "goos": "linux",
             "goarch": "amd64",
-            "url": "https://github.com/Lxapk/aigw-cpa-plugin/releases/download/v0.8.6/aigw-reverse-proxy_0.8.6_linux_amd64.zip",
-            "sha256": "0b58c9ff9e06b97b9f21fb136927fb24164e448a6a40f05def50e164dd812b85"
-          },
-          {
-            "goos": "linux",
-            "goarch": "arm64",
-            "url": "https://github.com/Lxapk/aigw-cpa-plugin/releases/download/v0.8.6/aigw-reverse-proxy_0.8.6_linux_arm64.zip",
-            "sha256": "69e749a646a25e044905a435fddb56b05154aea3595f1637f999c3e7225d8246"
+            "url": "https://github.com/Lxapk/aigw-cpa-plugin/releases/download/v0.9.0/aigw-reverse-proxy_0.9.0_linux_amd64.zip",
+            "sha256": "22d770a038d1917abbea17236dd8086c1105859968a2197d97a603317335cbc2"
           }
         ]
       }
