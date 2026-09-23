@@ -158,6 +158,16 @@ HTTP 2xx:
 2. 逐个调用 `daily-checkin`
 3. 在页面上列出每个账号的结果（成功 / 已签到 / 失败 + 原因 + code）
 
+> **关于页面路径**：签到页同时挂在两处 —— 可浏览的
+> `/v0/resource/plugins/aigw-reverse-proxy/checkin`，以及表单提交用的
+> `/v0/management/aigw-reverse-proxy/checkin`。
+>
+> 这是必须的：CPA 的 **resource 路由只接受 GET**
+> （`internal/pluginhost/management.go:295` 对非 GET 直接返回 false），
+> 而 **management 路由接受任意 method 并把请求体交给插件**（同文件 :232）。
+> 表单若用相对路径提交，就会落到 GET-only 的 resource 路径上被丢弃，
+> 浏览器只看到**空白页**。v0.4.1 起表单固定提交到 management 路径。
+
 ### 自动签到
 
 同一页面配置：
@@ -218,6 +228,7 @@ curl -s -X POST http://127.0.0.1:8317/v0/management/aigw-reverse-proxy/checkin/c
 | 每个账号都失败 `签到失败（HTTP 401）` | WorkBuddy token 失效，重新登录 |
 | `签到失败（code=9074）` | 设备指纹被拒；已自动重试一次仍失败时需重新登录该账号 |
 | 自动签到没触发 | 确认 `enabled: true`，且插件在配置的**当天该时刻之后**处于运行状态；可用「启动时补跑」兜底 |
+| **点保存/签到后页面一片空白** | **v0.4.1 已修**：表单曾用相对路径提交到只接受 GET 的 resource 路由。升级到 v0.4.1 即可 |
 
 > 账号池的**轮换重试**由 CPA 自己的 auth 轮换机制承担；插件负责把源应用的**冷却策略**
 > （硬冷却 / 软冷却 / 永久停用）准确地喂给响应 hook。

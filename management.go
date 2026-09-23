@@ -43,6 +43,18 @@ func managementRegistration() managementRegistrationResponse {
 				Path:        "/aigw-reverse-proxy/calls",
 				Description: "Recent reverse-proxy calls recorded by the AIGW plugin.",
 			},
+			// The check-in page itself is also mounted on the management path so
+			// the browser can land there directly (and after a form POST).
+			{
+				Method:      http.MethodGet,
+				Path:        "/aigw-reverse-proxy/checkin",
+				Description: "WorkBuddy check-in page.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/checkin",
+				Description: "Handle check-in form submissions (run / save).",
+			},
 			{
 				Method:      http.MethodGet,
 				Path:        "/aigw-reverse-proxy/checkin/status",

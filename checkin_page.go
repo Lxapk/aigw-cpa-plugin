@@ -126,14 +126,36 @@ func handleCheckinPost(req pluginapi.ManagementRequest) (managementResponse, boo
 		return managementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    htmlResponseHeaders(),
-			Body:       []byte(checkinPage()),
+			Body:       []byte(checkinPageWithNotice("设置已保存")),
+		}, true
+
+	case "config":
+		// JSON-ish form post from a script.
+		cfg, errDecode := decodeCheckinConfigBody(req.Body)
+		if errDecode != nil {
+			return managementResponse{
+				StatusCode: http.StatusBadRequest,
+				Headers:    jsonResponseHeaders(),
+				Body:       mustJSON(map[string]any{"error": errDecode.Error()}),
+			}, true
+		}
+		applied := applyCheckinConfig(cfg)
+		if applied.Enabled {
+			startCheckinScheduler()
+		}
+		return managementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    jsonResponseHeaders(),
+			Body:       mustJSON(map[string]any{"ok": true, "checkin": checkinStatusJSON()}),
 		}, true
 	}
 
+	// Unknown/missing action: render the page instead of returning nothing, so
+	// the operator never sees a blank screen.
 	return managementResponse{
-		StatusCode: http.StatusBadRequest,
+		StatusCode: http.StatusOK,
 		Headers:    htmlResponseHeaders(),
-		Body:       []byte(checkinPage()),
+		Body:       []byte(checkinPageWithNotice("未识别的操作，已显示当前状态")),
 	}, true
 }
 
@@ -203,11 +225,50 @@ func decodeCheckinConfigBody(body []byte) (checkinSettings, error) {
 	return cfg, nil
 }
 
+// managementFormAction returns the absolute POST target for the check-in form.
+//
+// The browsable page is served from a *resource* route
+// (/v0/resource/plugins/<id>/checkin), and CPA serves resource routes with GET
+// only (internal/pluginhost/management.go:295 rejects anything else). A form
+// action of "checkin" would therefore resolve to a GET-only URL and the POST
+// would be dropped, leaving a blank page.
+//
+// Management routes accept any method and receive the body
+// (internal/pluginhost/management.go:232), so the form must post there.
+func managementFormAction() string {
+	return managementBasePath() + "/" + pluginName + "/checkin"
+}
+
+// managementBasePath mirrors CPA's plugin management mount point.
+func managementBasePath() string {
+	return "/v0/management"
+}
+
 // ---- HTML ----------------------------------------------------------------
 
 // checkinPage renders the check-in UI.
 func checkinPage() string {
 	return checkinPageWithRun(nil)
+}
+
+// checkinPageWithNotice renders the page with a one-line status banner.
+func checkinPageWithNotice(notice string) string {
+	page := checkinPage()
+	if notice == "" {
+		return page
+	}
+	banner := `<div class="card ok">` + html.EscapeString(notice) + `</div>`
+	// Inject right after the intro paragraph so it is immediately visible.
+	marker := `<div class="muted">手动立即签到，或配置每天自动签到。`
+	if idx := strings.Index(page, marker); idx >= 0 {
+		// Find the end of that paragraph (first ">") after the marker's closing tag.
+		rest := page[idx:]
+		if end := strings.Index(rest, "</div>"); end >= 0 {
+			insertAt := idx + end + len("</div>")
+			return page[:insertAt] + banner + page[insertAt:]
+		}
+	}
+	return banner + page
 }
 
 // checkinPageWithRun renders the page, optionally highlighting a fresh run.
@@ -220,7 +281,7 @@ func checkinPageWithRun(fresh *checkinRun) string {
 	b.WriteString(checkinPageHead())
 
 	// --- auto settings form -------------------------------------------
-	b.WriteString(`<h2>自动签到</h2><form method="post" action="checkin" class="card">`)
+	b.WriteString(`<h2>自动签到</h2><form method="post" action="` + managementFormAction() + `" class="card">`)
 	b.WriteString(`<input type="hidden" name="action" value="save">`)
 	b.WriteString(`<label class="row"><input type="checkbox" name="enabled"`)
 	if cfg.Enabled {
@@ -242,7 +303,7 @@ func checkinPageWithRun(fresh *checkinRun) string {
 	b.WriteString(`</form>`)
 
 	// --- manual run ----------------------------------------------------
-	b.WriteString(`<h2>手动签到</h2><form method="post" action="checkin" class="card">`)
+	b.WriteString(`<h2>手动签到</h2><form method="post" action="` + managementFormAction() + `" class="card">`)
 	b.WriteString(`<input type="hidden" name="action" value="run">`)
 	b.WriteString(`<button type="submit"`)
 	if running, _ := status["running"].(bool); running {
