@@ -125,13 +125,13 @@ func interceptRequest(request []byte, afterAuth bool) ([]byte, error) {
 	if resp.Headers == nil {
 		resp.Headers = http.Header{}
 	}
-	resp.Headers.Set("X-AIGW-Provider", res.Provider)
-	resp.Headers.Set("X-AIGW-Model", target)
-	resp.Headers.Set("X-AIGW-Requested-Model", requested)
+	resp.Headers.Set("X-WorkBuddy-Provider", res.Provider)
+	resp.Headers.Set("X-WorkBuddy-Model", target)
+	resp.Headers.Set("X-WorkBuddy-Requested-Model", requested)
 	if res.Explicit {
-		resp.Headers.Set("X-AIGW-Route", "explicit")
+		resp.Headers.Set("X-WorkBuddy-Route", "explicit")
 	} else {
-		resp.Headers.Set("X-AIGW-Route", "default")
+		resp.Headers.Set("X-WorkBuddy-Route", "default")
 	}
 
 	return okEnvelope(resp)
