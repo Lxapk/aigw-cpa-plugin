@@ -137,17 +137,14 @@ func main() {
 	}
 	ok("all expected capabilities declared")
 
-	// --- 2. frontend auth: no key must be rejected (allow_no_key=false) --
+	// --- 2. frontend auth: defaults to delegation, keyless accepted ---------------
 	authResp := call(plugin, "frontend_auth.authenticate", json.RawMessage(`{"Method":"POST","Path":"/v1/chat/completions"}`))
-	if authResp.OK {
-		die("frontend_auth.authenticate should have rejected a keyless request")
+	if !authResp.OK {
+		die("frontend_auth.authenticate must not reject keyless requests by default")
 	}
-	if authResp.Error == nil || authResp.Error.Code != "invalid_api_key" {
-		die("unexpected auth error: %+v", authResp.Error)
-	}
-	ok("keyless request rejected: %s (%d)", authResp.Error.Code, authResp.Error.HTTPStatus)
+	ok("keyless request accepted (delegated to CPA's auth)")
 
-	// --- 3. frontend auth: correct key must pass ------------------------
+	// ---- 3. enable enforcement and verify ----------------------------------------
 	authResp = call(plugin, "frontend_auth.authenticate", json.RawMessage(`{"Method":"POST","Path":"/v1/chat/completions","Headers":{"Authorization":["Bearer sk-smoke"]}}`))
 	assertOK(authResp, "frontend_auth.authenticate(correct key)")
 	var authOut struct {
