@@ -843,6 +843,121 @@ curl -s -X POST "$BASE/v0/management/$P/reset" -H "Authorization: Bearer $KEY"
 | 2 | acct-b@example.com | 500 | 40 |
 | 3 | acct-c@example.com | 120 | 41 |
 
+## 2.11 基于 workbuddy-switch 的完善（v0.8.0）
+
+参考实现 [changexbc/workbuddy-switch](https://github.com/changexbc/workbuddy-switch)（Rust/Tauri 桌面 App）
+后，修正了本插件的**一个实现错误**并补齐了**两块能力**。
+
+### 2.11.1 修正：国际版的域名与路径（我原来写错了）
+
+| 项 | 国内版 (cn) | 国际版 (ai) |
+|---|---|---|
+| API 基址 | `https://www.codebuddy.cn` | `https://www.workbuddy.ai` |
+| **产品域（Origin/Referer）** | `https://www.codebuddy.cn` | **`https://www.codebuddy.ai`** |
+| OAuth platform | `workbuddy` | **`workbuddy-ai`** |
+| **billing 路径** | `/v2/billing/meter/...` | **`/billing/meter/...`（无 /v2）** |
+| 对话 / 模型列表 | `copilot.tencent.com` | `www.workbuddy.ai` |
+
+**我原来的三处错误：**
+
+1. 国际版产品域写成了 `workbuddy.ai`，**正确是 `codebuddy.ai`**
+   —— CodeBuddy 工具链把非产品域识别为"自建部署"，会去读企业端点设置
+2. OAuth platform 用了 `CLI`，未区分档位
+3. billing 路径未按档位切换
+
+**国际版 billing 的 404 回退**（参考实现实测得出）：
+
+```
+先试 /billing/meter/xxx
+仅当返回 HTTP 404 时才回落 /v2/billing/meter/xxx
+401 / 业务错误码 / 传输错误都**不算**路径问题，不换候选
+```
+
+> 设计上采用「档位单一事实来源」：所有档位差异集中在 `variant.go`，
+> 其它文件不得出现档位相关的字面量。
+
+### 2.11.2 积分模型升级：从"剩余量"到"剩余量 + 到期时间"
+
+**原来**只查一个旧接口，拿到一个总数。
+**现在**优先查三个新接口（旧接口作兜底）：
+
+```
+POST {base}/billing/meter/get-user-resource-summary          当前周期用量
+POST {base}/billing/meter/get-user-resource-paid-packages    付费包
+POST {base}/billing/meter/get-user-resource-free-packages    免费包
+```
+
+每个资源包解析为：
+
+| 字段 | 说明 |
+|---|---|
+| `PackageCode` / `PackageName` | 包标识 |
+| `Total` / `Remaining` / `Used` | 数量（缺失时互相推算） |
+| `ExpireAt` | **到期时间** |
+| `Expired` | 已过期 |
+| `ExpiringSoon` | **7 天内到期** |
+
+**到期时间的解析规则**（对应参考实现的 `resolve_expire_at`）：
+
+```
+1. 优先 DeductionEndTime / deductionEndTime / ExpiredTime / expiredTime
+2. 若 CycleEndTime 比它早超过 365 天 → 改用 CycleEndTime
+   （官方数据里 2049 这类是长期占位值，真实到期在周期末）
+3. 结果距 now 超过 730 天 → 视为「无到期时间」
+```
+
+三个接口可能提到同一个包，插件会**去重**，避免总额被重复累加。
+
+### 2.11.3 新增「按到期」选号策略
+
+参考实现的重要洞察：**选剩余最多的账号不是最优的 —— 积分会过期，
+应该先用快到期的。**
+
+新增 `by_expiry` 策略，完整移植其 **8 步决策链**：
+
+```
+1. 过滤有效候选（查询成功 + 未过期 + 有剩余）；空 → 不切换
+2. 目标 = 到期最早者（无到期时间的排最后）
+3. 紧迫度：目标到期剩余 > min_urgency_hours → 不切（都还早）
+4. 已是目标 → 不切
+5. 冷却期：距上次切换 < cooldown_seconds → 不切
+6. 存活门控：有会话在跑 → 不切（活进程持旧凭据，切了不生效）
+7. 价值过滤：目标剩余 < min_remaining → 不切
+8. 防抖动：目标仅比当前早 min_gap_hours 以内 → 不切
+否则切换
+```
+
+**每一步拒绝都带可读原因**，便于从面板与日志判断行为是否符合预期。
+
+配置：
+
+```yaml
+plugins:
+  configs:
+    aigw-reverse-proxy:
+      routing:
+        strategy: by_expiry      # 新增：按到期
+        cooldown_seconds: 300    # 切换冷却（默认 5 分钟）
+        min_gap_hours: 6         # 防抖动：到期差不足 6 小时不切
+        min_urgency_hours: 24    # 都还剩 >1 天就不切
+        min_remaining: 0         # 目标剩余低于此值不切（0=关闭）
+```
+
+### 2.11.4 面板增强
+
+**账号表**新增两列：
+
+| 列 | 说明 |
+|---|---|
+| **版本** | `cn` / `ai`，一眼区分国内/国际账号 |
+| **到期** | `N 天后`；7 天内显示 ⚠️ 并高亮；已过期标红 |
+
+**概览卡**新增「积分即将/已过期」计数。
+
+**选择顺序预览**在按到期策略下按到期时间排序，并显示每个账号的到期天数。
+
+> 已过期的积分**不再被视为可用账号**，与参考实现的 `Candidate::valid` 一致。
+
 ---
 
 ## 3. 获取与构建

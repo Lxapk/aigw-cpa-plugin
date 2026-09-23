@@ -651,11 +651,10 @@ func TestCheckinConfigViaPostJSON(t *testing.T) {
 
 // ---- helpers ------------------------------------------------------------
 
-// stubCheckinBase points the cn check-in base at a test server.
+// stubCheckinBase points every cn-facing base (billing, check-in) at a test
+// server, so one httptest server can answer all of them.
 func stubCheckinBase(base string) func() {
-	original := checkinBaseForTest()
-	setCheckinBase(base)
-	return func() { setCheckinBase(original) }
+	return redirectAllCnBases(base)
 }
 
 func mustMarshal(t *testing.T, v any) json.RawMessage {

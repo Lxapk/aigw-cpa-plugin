@@ -68,8 +68,8 @@ func TestWorkBuddyBaseURLMatchesSource(t *testing.T) {
 
 func TestWorkBuddyOriginURLMatchesSource(t *testing.T) {
 	// a2/b.p(): global -> workbuddy.ai, otherwise codebuddy.cn
-	if got := workBuddyOriginURL("www.workbuddy.ai"); got != "https://www.workbuddy.ai" {
-		t.Errorf("global origin = %q", got)
+	if got := workBuddyOriginURL("www.workbuddy.ai"); got != "https://www.codebuddy.ai" {
+		t.Errorf("global origin = %q, want the codebuddy.ai product domain", got)
 	}
 	if got := workBuddyOriginURL("cn"); got != "https://www.codebuddy.cn" {
 		t.Errorf("cn origin = %q", got)
@@ -294,8 +294,11 @@ func TestApplyWorkBuddyHeadersGlobalOrigin(t *testing.T) {
 	creds := &workBuddyCredentials{AccessToken: "tok", Domain: "www.workbuddy.ai"}
 	h := http.Header{}
 	applyWorkBuddyHeaders(h, creds)
-	if got := h.Get("Origin"); got != "https://www.workbuddy.ai" {
-		t.Fatalf("global origin = %q", got)
+	// The international *product* domain is codebuddy.ai (variant.rs::
+	// productDomain). WorkBuddy clients write www.workbuddy.ai, which CodeBuddy
+	// tooling would classify as self-hosted, so it is mapped across.
+	if got := h.Get("Origin"); got != "https://www.codebuddy.ai" {
+		t.Fatalf("global origin = %q, want https://www.codebuddy.ai", got)
 	}
 }
 
@@ -325,15 +328,14 @@ func TestIsWorkBuddyGlobalDomainMatchesSource(t *testing.T) {
 // TestGlobalDomainSelectsAllBases ties the domain rule to every endpoint base.
 func TestGlobalDomainSelectsAllBases(t *testing.T) {
 	origGlobal := workBuddyGlobalBase()
-	origCheckin := checkinBaseForTest()
 	origCopilot := copilotHostValue()
+	restoreCn := redirectAllCnBases("https://CN-CHECKIN")
 	setWorkBuddyGlobalBase("https://GLOBAL")
-	setCheckinBase("https://CN-CHECKIN")
 	setCopilotHost("https://CN-CHAT")
 	defer func() {
 		setWorkBuddyGlobalBase(origGlobal)
-		setCheckinBase(origCheckin)
 		setCopilotHost(origCopilot)
+		restoreCn()
 	}()
 
 	global := "www.workbuddy.ai"
@@ -360,9 +362,9 @@ func TestGlobalDomainSelectsAllBases(t *testing.T) {
 	if got := workBuddyCheckinBase(cn); got != "https://CN-CHECKIN" {
 		t.Errorf("cn checkin base = %q", got)
 	}
-	// Origin/Referer (a2/b.java:696).
-	if got := workBuddyOriginURL(global); got != "https://www.workbuddy.ai" {
-		t.Errorf("global origin = %q", got)
+	// Origin/Referer uses the variant's product domain (variant.rs).
+	if got := workBuddyOriginURL(global); got != "https://www.codebuddy.ai" {
+		t.Errorf("global origin = %q, want https://www.codebuddy.ai", got)
 	}
 	if got := workBuddyOriginURL(cn); got != "https://www.codebuddy.cn" {
 		t.Errorf("cn origin = %q", got)

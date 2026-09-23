@@ -66,11 +66,11 @@ func handleQuotaRequest(req pluginapi.ManagementRequest) (managementResponse, bo
 			StatusCode: http.StatusOK,
 			Headers:    jsonResponseHeaders(),
 			Body: mustJSON(map[string]any{
-				"results":         results,
-				"total_credits":   total,
-				"accounts_known":  known,
-				"accounts_total":  accounts,
-				"refreshed_at":    time.Now().Format(time.RFC3339),
+				"results":        results,
+				"total_credits":  total,
+				"accounts_known": known,
+				"accounts_total": accounts,
+				"refreshed_at":   time.Now().Format(time.RFC3339),
 			}),
 		}, true
 

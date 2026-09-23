@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -60,13 +57,13 @@ const (
 	workBuddyQuotaRangeMillis = int64(3185136000000)
 )
 
-// workBuddyQuota is the parsed result of one account's quota query.
+// workBuddyQuota is the parsed result of one account's credit query.
 type workBuddyQuota struct {
-	// Credits is the summed cycle remaining capacity (d.f3827b in the app).
+	// Credits is the summed remaining capacity across resources.
 	Credits int64
 	// Known reports whether the provider returned usable numbers.
 	Known bool
-	// Message mirrors the app's user-facing summary ("周期剩余 N").
+	// Message mirrors the app's user-facing summary.
 	Message string
 	// Detail carries per-account breakdown for the UI.
 	Detail string
@@ -74,6 +71,38 @@ type workBuddyQuota struct {
 	HTTPStatus int
 	// Err is set when the query failed; Credits is then 0.
 	Err string
+
+	// Summary is the full credit model, including expiry. It is what makes
+	// "use the soonest-expiring balance first" possible.
+	Summary creditSummary
+
+	// Labels are the human-readable package names, for the panel.
+	Labels []string
+}
+
+// soonestExpireAt exposes the summary's earliest expiry (epoch seconds, 0 when
+// nothing expires).
+func (q *workBuddyQuota) soonestExpireAt() int64 {
+	if q == nil {
+		return 0
+	}
+	return q.Summary.SoonestExpireAt
+}
+
+// expiringSoon reports whether the soonest expiry is within 7 days.
+func (q *workBuddyQuota) expiringSoon() bool {
+	if q == nil {
+		return false
+	}
+	return q.Summary.ExpiringSoon
+}
+
+// expired reports whether any resource has already expired.
+func (q *workBuddyQuota) expired() bool {
+	if q == nil {
+		return false
+	}
+	return q.Summary.Expired
 }
 
 // workBuddyQuotaBase ports the base selection for the quota call
@@ -123,36 +152,40 @@ func quotaRequestBody(now time.Time) []byte {
 	return raw
 }
 
-// fetchQuota performs the quota query for one credential.
+// fetchQuota performs the credit query for one credential.
+//
+// It prefers the three new endpoints (which carry expiry timestamps) and falls
+// back to the APK-era summed endpoint, per the reference implementation.
 func (c *workBuddyClient) fetchQuota(ctx context.Context, creds *workBuddyCredentials) (*workBuddyQuota, error) {
 	if creds == nil || creds.AccessToken == "" {
 		return nil, errors.New("缺少访问令牌")
 	}
 
-	endpoint := workBuddyQuotaBase(creds.Domain) + workBuddyQuotaPath
-	req, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, endpoint,
-		bytes.NewReader(quotaRequestBody(time.Now())))
-	if errRequest != nil {
-		return nil, errRequest
+	summary := c.fetchCredits(ctx, creds)
+	out := &workBuddyQuota{
+		Credits: int64(summary.Remaining),
+		Known:   summary.Known,
+		Summary: summary,
+		Err:     summary.Error,
 	}
-	applyWorkBuddyHeaders(req.Header, creds)
-
-	resp, errDo := c.httpClient.Do(req)
-	if errDo != nil {
-		return nil, fmt.Errorf("查询额度失败: %w", errDo)
+	if summary.Known {
+		out.Message = fmt.Sprintf("周期剩余 %d", int64(summary.Remaining))
+		out.Detail = fmt.Sprintf("%d 个额度包", len(summary.Resources))
+		for _, res := range summary.Resources {
+			label := res.PackageName
+			if label == "" {
+				label = res.PackageCode
+			}
+			if label != "" {
+				out.Labels = append(out.Labels, label)
+			}
+		}
 	}
-	defer resp.Body.Close()
-
-	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if errRead != nil {
-		return nil, fmt.Errorf("读取额度响应失败: %w", errRead)
-	}
-
-	return interpretQuotaResponse(resp.StatusCode, body), nil
+	return out, nil
 }
 
-// interpretQuotaResponse applies the app's parsing and aggregation rules.
-// It is separated from the HTTP call so the decision table is unit-testable.
+// interpretQuotaResponse applies the app's parsing and aggregation rules to the
+// legacy endpoint. Kept for the parse tests that pin the original behaviour.
 func interpretQuotaResponse(statusCode int, body []byte) *workBuddyQuota {
 	out := &workBuddyQuota{HTTPStatus: statusCode}
 
@@ -162,56 +195,24 @@ func interpretQuotaResponse(statusCode int, body []byte) *workBuddyQuota {
 		return out
 	}
 
-	// The response nests under data.Response.Data.Accounts, all capitalised.
-	var doc struct {
-		Data *struct {
-			Response *struct {
-				Data *struct {
-					Accounts []struct {
-						CycleCapacitySize   *json.Number `json:"CycleCapacitySize"`
-						CycleCapacityRemain *json.Number `json:"CycleCapacityRemain"`
-						CapacityRemain      *json.Number `json:"CapacityRemain"`
-					} `json:"Accounts"`
-				} `json:"Data"`
-			} `json:"Response"`
-		} `json:"data"`
-	}
-	if len(body) == 0 || json.Unmarshal(body, &doc) != nil {
-		out.Err = "查询额度失败"
+	sum, errLegacy := parseLegacyRemainder(body)
+	if errLegacy != nil {
+		out.Err = errLegacy.Error()
 		return out
 	}
-	// a2/b.java:418 — "响应缺少 data".
-	if doc.Data == nil {
-		out.Err = "响应缺少 data"
+	if sum.Error != "" {
+		out.Err = sum.Error
 		return out
 	}
-
-	var sum int64
-	var accounts int
-	if doc.Data.Response != nil && doc.Data.Response.Data != nil {
-		for _, acc := range doc.Data.Response.Data.Accounts {
-			accounts++
-			size := quotaNumber(acc.CycleCapacitySize)
-			remain := quotaNumber(acc.CycleCapacityRemain)
-			// a2/b.java:437 — fall back to CapacityRemain when the cycle
-			// figures are absent or non-positive.
-			if size <= 0 && remain <= 0 {
-				remain = quotaNumber(acc.CapacityRemain)
-			}
-			// a2/b.java:441 — only positive remainders are summed.
-			if remain > 0 {
-				sum += remain
-			}
-		}
-	}
-
-	out.Credits = sum
-	out.Known = true
-	out.Message = fmt.Sprintf("周期剩余 %d", sum)
-	out.Detail = fmt.Sprintf("%d 个额度包", accounts)
+	out.Credits = int64(sum.Remaining)
+	out.Known = sum.Known
+	out.Message = fmt.Sprintf("周期剩余 %d", out.Credits)
+	out.Summary = sum
 	return out
 }
 
+// interpretQuotaResponse applies the app's parsing and aggregation rules.
+// It is separated from the HTTP call so the decision table is unit-testable.
 // quotaNumber reads a json.Number, treating absent/invalid as 0.
 func quotaNumber(n *json.Number) int64 {
 	if n == nil {

@@ -38,6 +38,9 @@ import (
 type schedulerStrategy string
 
 const (
+	// strategyByExpiry spends the soonest-expiring credits first, which is the
+	// reference implementation's rotation policy.
+	strategyByExpiry schedulerStrategy = "by_expiry"
 	// strategyByCredits prefers the account with the most remaining quota.
 	strategyByCredits schedulerStrategy = "by_credits"
 	// strategyRoundRobin rotates through the candidates deterministically.
@@ -48,6 +51,7 @@ const (
 
 // allSchedulerStrategies lists the strategies in display order.
 var allSchedulerStrategies = []schedulerStrategy{
+	strategyByExpiry,
 	strategyByCredits,
 	strategyRoundRobin,
 	strategyRandom,
@@ -63,6 +67,8 @@ func normalizeStrategy(s string) schedulerStrategy {
 		return strategyRandom
 	case string(strategyByCredits), "credits", "quota", "按额度", "额度":
 		return strategyByCredits
+	case string(strategyByExpiry), "expiry", "expire", "soonest", "按到期", "到期", "紧迫":
+		return strategyByExpiry
 	}
 	return strategyByCredits
 }
@@ -73,6 +79,8 @@ func (s schedulerStrategy) label() string {
 		return "轮巡"
 	case strategyRandom:
 		return "随机"
+	case strategyByExpiry:
+		return "按到期"
 	default:
 		return "按额度"
 	}
@@ -88,6 +96,12 @@ type schedulerState struct {
 	picks map[string]uint64
 	// rng is shared by the random strategy.
 	rng *rand.Rand
+	// lastSwitch records the most recent by_expiry switch, for the cooldown
+	// gate (rotate.rs: last_switch_at_ms).
+	lastSwitch time.Time
+	// lastPickedID is the account most recently handed to a request, used as
+	// the "current account" in the rotation gate chain.
+	lastPickedID string
 }
 
 func newSchedulerState() *schedulerState {
@@ -304,6 +318,8 @@ func schedulerPick(request []byte) ([]byte, error) {
 	strategy := state.settings.get().Routing.Strategy
 	var chosen string
 	switch strategy {
+	case strategyByExpiry:
+		chosen, _ = pickByExpiryScheduler(req, candidates)
 	case strategyRoundRobin:
 		chosen = state.scheduler.pickRoundRobin(schedulerProviderKey(req), candidates)
 	case strategyRandom:
@@ -317,6 +333,70 @@ func schedulerPick(request []byte) ([]byte, error) {
 
 	state.scheduler.recordPick(chosen)
 	return okEnvelope(pluginapi.SchedulerPickResponse{Handled: true, AuthID: chosen})
+}
+
+// pickByExpiryScheduler adapts scheduler candidates to the rotation gate chain.
+//
+// The "current account" is whatever the plugin last handed out; the first pick
+// has none, so the chain switches unconditionally (subject to the gates).
+func pickByExpiryScheduler(req pluginapi.SchedulerPickRequest, candidates []schedulerCandidate) (string, rotateDecision) {
+	rot := make([]rotateCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		rc := rotateCandidate{
+			AccountID:      c.ID,
+			DisplayName:    c.ID,
+			TotalRemaining: float64(c.Credits),
+			// Default to valid. A candidate with no quota record still has to
+			// be selectable, otherwise by_expiry would refuse to serve any
+			// request until a refresh had run for every account.
+			Valid: true,
+		}
+		// Attach the expiry from the recorded credit summary, if any.
+		state.quota.mu.Lock()
+		q, hasQuota := state.quota.byAuth[c.ID]
+		state.quota.mu.Unlock()
+		if !hasQuota {
+			// Fall back to a uid-keyed reading.
+			if alt, okAlt := lookupQuotaByUID(c.ID); okAlt {
+				q, hasQuota = alt, true
+			}
+		}
+		if hasQuota && q != nil {
+			rc.SoonestExpireAt = q.soonestExpireAt()
+			// An expired balance disqualifies the account as a target, matching
+			// Candidate::valid in the reference implementation. A missing
+			// reading does not: it only means the expiry is unknown.
+			if q.expired() || !q.Known {
+				rc.Valid = false
+			}
+		}
+		rot = append(rot, rc)
+	}
+
+	current := state.scheduler.lastPicked()
+	target, decision := pickByExpiry(rot, current, time.Now())
+	if decision.Kind == rotateSwitch {
+		state.scheduler.noteSwitch(time.Now())
+	}
+	return target, decision
+}
+
+// lookupQuotaByUID finds a recorded credit summary by uid or auth id.
+func lookupQuotaByUID(id string) (*workBuddyQuota, bool) {
+	state.quota.mu.Lock()
+	defer state.quota.mu.Unlock()
+	if q, ok := state.quota.byAuth[id]; ok && q != nil {
+		return q, true
+	}
+	for authID, q := range state.quota.byAuth {
+		if q == nil {
+			continue
+		}
+		if authID == id {
+			return q, true
+		}
+	}
+	return nil, false
 }
 
 // schedulerOwnsProvider reports whether this plugin should schedule the request.
@@ -366,6 +446,14 @@ func (s *schedulerState) recordPick(authID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.picks[authID]++
+	s.lastPickedID = authID
+}
+
+// lastPicked returns the account most recently selected.
+func (s *schedulerState) lastPicked() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastPickedID
 }
 
 // pickCounts returns a copy of the per-auth selection counters.
@@ -385,4 +473,19 @@ func (s *schedulerState) resetCursor() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cursor = make(map[string]uint64)
+	s.lastSwitch = time.Time{}
+}
+
+// lastSwitchAt returns when by_expiry last changed account.
+func (s *schedulerState) lastSwitchAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSwitch
+}
+
+// noteSwitch records that by_expiry moved to a different account.
+func (s *schedulerState) noteSwitch(at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSwitch = at
 }

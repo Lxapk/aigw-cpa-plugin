@@ -132,10 +132,7 @@ func workBuddyBaseURL(domain string) string {
 //
 //	D(c0368a).equals("global") ? "https://www.workbuddy.ai" : "https://www.codebuddy.cn"
 func workBuddyOriginURL(domain string) string {
-	if isWorkBuddyGlobalDomain(domain) {
-		return "https://www.workbuddy.ai"
-	}
-	return "https://www.codebuddy.cn"
+	return variantForDomain(domain).productDomain()
 }
 
 // workBuddyHTTPClient performs the plugin's own HTTPS calls.
@@ -442,15 +439,20 @@ func refreshWorkBuddyToken(creds *workBuddyCredentials) (*workBuddyCredentials, 
 	return &updated, nil
 }
 
-// applyWorkBuddyHeaders ports a2/b.p(): the upstream header set, including the
-// optional identity headers.
-func applyWorkBuddyHeaders(h http.Header, creds *workBuddyCredentials) {
+// applyWorkBuddyHeadersVariant ports a2/b.java:p() with the variant-correct
+// product domain for Origin/Referer.
+//
+// The reference implementation (variant.rs::productDomain) is explicit that the
+// international product domain is www.codebuddy.ai, not workbuddy.ai —
+// CodeBuddy tooling classifies anything else as a self-hosted deployment.
+func applyWorkBuddyHeadersVariant(h http.Header, creds *workBuddyCredentials, variant wbVariant) {
 	h.Set("Authorization", "Bearer "+creds.AccessToken)
 	h.Set("Accept", "application/json")
 	h.Set("Content-Type", "application/json")
 	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("User-Agent", codebuddyUA)
-	origin := workBuddyOriginURL(creds.Domain)
+
+	origin := variant.productDomain()
 	h.Set("Origin", origin)
 	h.Set("Referer", origin+"/")
 	h.Set("X-Product", "SaaS")
@@ -462,8 +464,14 @@ func applyWorkBuddyHeaders(h http.Header, creds *workBuddyCredentials) {
 		h.Set("X-Tenant-Id", creds.EnterpriseID)
 	}
 	if creds.Domain != "" {
-		h.Set("X-Domain", creds.Domain)
+		h.Set("X-Domain", productDomainFor(creds.Domain, variant))
 	}
+}
+
+// applyWorkBuddyHeaders ports a2/b.p(): the upstream header set, including the
+// optional identity headers.
+func applyWorkBuddyHeaders(h http.Header, creds *workBuddyCredentials) {
+	applyWorkBuddyHeadersVariant(h, creds, variantForDomain(creds.Domain))
 }
 
 // ---- tiny helpers ---------------------------------------------------------

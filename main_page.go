@@ -178,16 +178,26 @@ func mainPage() string {
 	if known > 0 {
 		creditsText = fmt.Sprint(credits)
 	}
-	writeCard("已知额度合计", creditsText)
-	writeCard("已查询额度", fmt.Sprintf("%d / %d", known, total))
+	writeCard("已知积分合计", creditsText)
+	writeCard("已查询积分", fmt.Sprintf("%d / %d", known, total))
+	// Urgent accounts get their own card so the number is impossible to miss.
+	urgent := 0
+	for _, a := range accounts {
+		if a.CreditsExpiringSoon || a.CreditsExpired {
+			urgent++
+		}
+	}
+	if urgent > 0 {
+		writeCard("积分即将/已过期", urgent)
+	}
 	b.WriteString(`</div>`)
 
 	b.WriteString(`<div class="card"><div class="muted">账号列表读取自 CPA 认证存储，登录后立即可见，无需先发起请求。` +
-		`仅显示 WorkBuddy / CodeBuddy 账号。</div>`)
+		`仅显示 WorkBuddy / CodeBuddy 账号。积分 7 天内到期会高亮标注，建议优先使用。</div>`)
 	if len(accounts) == 0 {
 		b.WriteString(`<p class="muted">还没有 WorkBuddy 账号。请到 CPA 的「认证」页登录。</p>`)
 	} else {
-		b.WriteString(`<table><tr><th>账号</th><th>UID</th><th>区域</th><th>剩余额度</th><th>状态</th></tr>`)
+		b.WriteString(`<table><tr><th>账号</th><th>UID</th><th>版本</th><th>剩余积分</th><th>到期</th><th>状态</th></tr>`)
 		for _, a := range accounts {
 			status, class := "可用", "ok"
 			reason := ""
@@ -209,10 +219,21 @@ func mainPage() string {
 			if a.CreditsKnown {
 				cv = fmt.Sprint(a.Credits)
 			}
+			// Expiry column: highlight 7-day urgency and mark expired credits.
+			expiry, expiryClass := "—", "muted"
+			switch {
+			case a.CreditsExpired:
+				expiry, expiryClass = "已过期", "bad"
+			case a.CreditsExpireAt > 0 && a.CreditsExpiringSoon:
+				expiry, expiryClass = fmt.Sprintf("%d 天后 ⚠️", a.CreditsExpireDays), "warn"
+			case a.CreditsExpireAt > 0:
+				expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "ok"
+			}
 			b.WriteString(`<tr><td>` + html.EscapeString(a.Label) + `</td>`)
 			b.WriteString(`<td><code>` + html.EscapeString(firstNonEmpty(a.UID, a.AuthIndex)) + `</code></td>`)
-			b.WriteString(`<td>` + html.EscapeString(a.Region) + `</td>`)
+			b.WriteString(`<td>` + html.EscapeString(a.Variant) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(cv) + `</td>`)
+			b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
 			b.WriteString(`<td class="` + class + `">` + status)
 			if reason != "" {
 				b.WriteString(` <span class="muted">` + html.EscapeString(reason) + `</span>`)
@@ -308,15 +329,25 @@ func mainPage() string {
 	// Selection order preview.
 	if rows, okRows := routing["order"].([]map[string]any); okRows && len(rows) > 0 {
 		b.WriteString(`<div class="card"><div class="muted">选择顺序预览（按当前策略）</div>`)
-		b.WriteString(`<table><tr><th>#</th><th>账号</th><th>剩余额度</th><th>已选中次数</th></tr>`)
+		b.WriteString(`<table><tr><th>#</th><th>账号</th><th>剩余积分</th><th>到期</th><th>已选中次数</th></tr>`)
 		for _, row := range rows {
 			cv := "—"
 			if known, _ := row["known"].(bool); known {
 				cv = fmt.Sprint(row["credits"])
 			}
+			expiry, expiryClass := "—", "muted"
+			switch {
+			case boolFromAny(row["expired"]):
+				expiry, expiryClass = "已过期", "bad"
+			case boolFromAny(row["expiring_soon"]):
+				expiry, expiryClass = fmt.Sprint(row["expire_days"])+" 天后 ⚠️", "warn"
+			case row["expire_days"] != nil && fmt.Sprint(row["expire_days"]) != "0":
+				expiry, expiryClass = fmt.Sprint(row["expire_days"])+" 天后", "ok"
+			}
 			b.WriteString(`<tr><td>` + fmt.Sprint(row["position"]) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(fmt.Sprint(row["label"])) + `</td>`)
 			b.WriteString(`<td>` + html.EscapeString(cv) + `</td>`)
+			b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
 			b.WriteString(`<td>` + fmt.Sprint(row["picks"]) + `</td></tr>`)
 		}
 		b.WriteString(`</table></div>`)

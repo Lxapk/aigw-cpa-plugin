@@ -647,14 +647,14 @@ func main() {
 	ok("scheduler.pick -> auth=%s (handled)", pickOwnOut.AuthID)
 
 	// The three strategies must be switchable from the management API.
-	for _, strategy := range []string{"round_robin", "random", "by_credits"} {
+	for _, strategy := range []string{"by_expiry", "round_robin", "random", "by_credits"} {
 		body, _ := json.Marshal(map[string]string{"strategy": strategy})
 		cfgResp := call(plugin, "management.handle", json.RawMessage(
 			`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"`+
 				base64Std(string(body))+`"}`))
 		assertOK(cfgResp, "management.handle(/routing/config "+strategy+")")
 	}
-	ok("routing strategy switchable: round_robin / random / by_credits")
+	ok("routing strategy switchable: by_expiry / round_robin / random / by_credits")
 
 	routingResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/aigw-reverse-proxy/routing/status"}`))
 	assertOK(routingResp, "management.handle(/routing/status)")
@@ -670,10 +670,48 @@ func main() {
 		} `json:"routing"`
 	}
 	mustUnmarshal(routingEnv.Body, &routingDoc)
-	if len(routingDoc.Routing.Options) != 3 {
-		die("expected 3 strategy options, got %d", len(routingDoc.Routing.Options))
+	if len(routingDoc.Routing.Options) != 4 {
+		die("expected 4 strategy options, got %d", len(routingDoc.Routing.Options))
 	}
 	ok("routing/status -> strategy=%s options=%d", routingDoc.Routing.Strategy, len(routingDoc.Routing.Options))
+
+	// The by_expiry strategy must be selectable and answer a pick request.
+	//
+	// Note: the rotation gate chain deliberately refuses to "switch" to the
+	// account that is already current. After the earlier by_credits pick the
+	// current account is "a", so a two-candidate request may legitimately come
+	// back unhandled. A single candidate that is not current proves the path
+	// works without depending on that state.
+	setStrategy := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6ImJ5X2V4cGlyeSJ9"}`))
+	assertOK(setStrategy, "routing/config by_expiry")
+	expiryPick := call(plugin, "scheduler.pick", json.RawMessage(`{"Provider":"codebuddy","Candidates":[{"ID":"fresh-account","Provider":"codebuddy","Status":"active"}]}`))
+	assertOK(expiryPick, "scheduler.pick(by_expiry)")
+	var expiryOut struct {
+		Handled bool   `json:"Handled"`
+		AuthID  string `json:"AuthID"`
+	}
+	mustUnmarshal(expiryPick.Result, &expiryOut)
+	if !expiryOut.Handled || expiryOut.AuthID != "fresh-account" {
+		die("by_expiry must select a target it has not already chosen (got %+v)", expiryOut)
+	}
+	ok("by_expiry strategy selects an account (auth=%s)", expiryOut.AuthID)
+
+	// The gate chain must refuse to re-select the current account, which is the
+	// anti-flap behaviour ported from the reference implementation.
+	repeatPick := call(plugin, "scheduler.pick", json.RawMessage(`{"Provider":"codebuddy","Candidates":[{"ID":"fresh-account","Provider":"codebuddy","Status":"active"}]}`))
+	assertOK(repeatPick, "scheduler.pick(by_expiry, repeat)")
+	var repeatOut struct {
+		Handled bool `json:"Handled"`
+	}
+	mustUnmarshal(repeatPick.Result, &repeatOut)
+	if repeatOut.Handled {
+		die("by_expiry must not re-select the account that is already current")
+	}
+	ok("by_expiry gate chain refuses to re-select the current account")
+
+	// Restore the default strategy for the remaining checks.
+	restoreStrategy := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6ImJ5X2NyZWRpdHMifQ=="}`))
+	assertOK(restoreStrategy, "routing/config by_credits")
 
 	// --- 17. shutdown ---------------------------------------------------
 	C.call_shutdown(&plugin)

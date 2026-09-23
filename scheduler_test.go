@@ -416,8 +416,8 @@ func TestRoutingStatusEndpoint(t *testing.T) {
 	if doc.Routing.Strategy != string(strategyByCredits) {
 		t.Errorf("strategy = %q", doc.Routing.Strategy)
 	}
-	if len(doc.Routing.Options) != 3 {
-		t.Errorf("expected 3 strategy options, got %d", len(doc.Routing.Options))
+	if len(doc.Routing.Options) != len(allSchedulerStrategies) {
+		t.Errorf("expected %d strategy options, got %d", len(allSchedulerStrategies), len(doc.Routing.Options))
 	}
 	if len(doc.Routing.Order) != 1 {
 		t.Errorf("expected 1 account in the order preview, got %+v", doc.Routing.Order)

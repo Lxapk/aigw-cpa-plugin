@@ -56,6 +56,22 @@ type workBuddyAccount struct {
 	// CreditsAt is when the quota was last read.
 	CreditsAt time.Time `json:"credits_at,omitempty"`
 
+	// CreditsExpireAt is the soonest expiry across this account's credit
+	// resources, in epoch seconds (0 = no expiry). Ported from the reference
+	// implementation's soonestExpireAt.
+	CreditsExpireAt int64 `json:"credits_expire_at,omitempty"`
+	// CreditsExpireDays is the whole-day countdown to CreditsExpireAt.
+	CreditsExpireDays int64 `json:"credits_expire_days,omitempty"`
+	// CreditsExpiringSoon reports CreditsExpireAt within 7 days.
+	CreditsExpiringSoon bool `json:"credits_expiring_soon"`
+	// CreditsExpired reports that a credit resource has already expired.
+	CreditsExpired bool `json:"credits_expired"`
+	// CreditPackages lists the package names, for the detail view.
+	CreditPackages []string `json:"credit_packages,omitempty"`
+	// Variant is "cn" or "ai", shown so the operator can see which service an
+	// account belongs to.
+	Variant string `json:"variant"`
+
 	// CoolKind / Reason / CooldownUntil come from the pool when it has seen
 	// this credential; they are empty otherwise.
 	CoolKind      string    `json:"cool_kind,omitempty"`
@@ -226,13 +242,39 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 	for i := range accounts {
 		a := &accounts[i]
 
+		// Variant label for the UI.
+		a.Variant = string(variantForDomain(a.Domain))
+
 		// Quota: prefer the newest reading we hold.
 		state.quota.mu.Lock()
 		if q, ok := state.quota.byAuth[a.AuthIndex]; ok && q != nil && q.Known {
 			a.Credits = q.Credits
 			a.CreditsKnown = true
+			a.CreditsExpireAt = q.soonestExpireAt()
+			a.CreditsExpiringSoon = q.expiringSoon()
+			a.CreditsExpired = q.expired()
+			a.CreditPackages = q.Labels
 		}
 		state.quota.mu.Unlock()
+
+		// A uid-keyed reading is the fallback when the file name differs.
+		if !a.CreditsKnown {
+			if q, ok := lookupQuotaByUID(a.UID); ok {
+				a.Credits = q.Credits
+				a.CreditsKnown = q.Known
+				a.CreditsExpireAt = q.soonestExpireAt()
+				a.CreditsExpiringSoon = q.expiringSoon()
+				a.CreditsExpired = q.expired()
+				a.CreditPackages = q.Labels
+			}
+		}
+		if a.CreditsExpireAt > 0 {
+			days := (a.CreditsExpireAt - time.Now().Unix()) / 86400
+			if days < 0 {
+				days = 0
+			}
+			a.CreditsExpireDays = days
+		}
 
 		// Pool: cooldown / cool kind when this credential has been exercised.
 		for _, lane := range state.pool.snapshot() {
@@ -251,11 +293,13 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 			break
 		}
 
-		// Usability mirrors A0/s.java:596's guard. A credential flagged with a
-		// reason we already set (e.g. an unparsable file) stays unusable.
+		// Usability mirrors A0/s.java:596's guard, plus the reference
+		// implementation's rule that an expired balance is not a valid target.
+		// A credential flagged with a reason we already set (e.g. an unparsable
+		// file) stays unusable.
 		now := time.Now()
 		blockedByReason := a.Reason != "" && !a.CreditsKnown && a.UID == "" && a.CoolKind == ""
-		a.Usable = !a.Disabled && !a.Expired && !blockedByReason &&
+		a.Usable = !a.Disabled && !a.Expired && !a.CreditsExpired && !blockedByReason &&
 			(a.CooldownUntil.IsZero() || !now.Before(a.CooldownUntil))
 	}
 	return accounts

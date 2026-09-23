@@ -155,17 +155,22 @@ func TestInterpretQuotaResponseEmptyAccounts(t *testing.T) {
 // ---- HTTP call ---------------------------------------------------------
 
 func TestFetchQuotaSendsExpectedRequest(t *testing.T) {
-	var gotMethod, gotPath, gotAuth string
+	var (
+		gotMethod string
+		gotPaths  []string
+		gotAuth   string
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		gotMethod = r.Method
+		gotPaths = append(gotPaths, r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":9,"CycleCapacityRemain":9}]}}}}`))
+		_, _ = w.Write([]byte(`{"data":{"Packages":[{"Resources":[{"PackageCode":"p1","TotalAmount":9,"RemainingAmount":9}]}]}}`))
 	}))
 	defer server.Close()
 
-	origCheckin := checkinBaseForTest()
-	setCheckinBase(server.URL)
-	defer setCheckinBase(origCheckin)
+	restoreBase := stubCheckinBase(server.URL)
+	defer restoreBase()
 
 	q, errQuota := workBuddyUpstream.fetchQuota(testContext(), &workBuddyCredentials{
 		AccessToken: "tok", Domain: "cn", UID: "u-1",
@@ -174,13 +179,24 @@ func TestFetchQuotaSendsExpectedRequest(t *testing.T) {
 		t.Fatalf("unexpected error: %v", errQuota)
 	}
 	if !q.Known || q.Credits != 9 {
-		t.Fatalf("quota = %+v", q)
+		t.Fatalf("quota = %+v (want 9 after dedupe across endpoints)", q)
 	}
 	if gotMethod != http.MethodPost {
 		t.Errorf("method = %s", gotMethod)
 	}
-	if !strings.HasSuffix(gotPath, workBuddyQuotaPath) {
-		t.Errorf("path = %q", gotPath)
+	// All three new endpoints are queried, on the cn base (/v2/billing/meter).
+	wantPaths := []string{resourceSummaryPath, resourcePaidPath, resourceFreePath}
+	for _, want := range wantPaths {
+		found := false
+		for _, got := range gotPaths {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("endpoint %q was not queried; got %v", want, gotPaths)
+		}
 	}
 	if gotAuth != "Bearer tok" {
 		t.Errorf("auth = %q", gotAuth)
@@ -344,16 +360,18 @@ func TestQuotaDescribe(t *testing.T) {
 
 func TestQuotaFetchReturnsCredits(t *testing.T) {
 	resetState()
+	// The plugin now prefers the three new endpoints; answer those with a
+	// resource that carries both an amount and an expiry.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"Response":{"Data":{"Accounts":[
-			{"CycleCapacitySize":100,"CycleCapacityRemain":64}
-		]}}}}`))
+		_, _ = w.Write([]byte(`{"data":{"Packages":[{"Resources":[
+			{"PackageCode":"p1","TotalAmount":100,"RemainingAmount":64,
+			 "DeductionEndTime":1893456000000}
+		]}]}}`))
 	}))
 	defer server.Close()
-	origCheckin := checkinBaseForTest()
-	setCheckinBase(server.URL)
-	defer setCheckinBase(origCheckin)
+	restoreBase := stubCheckinBase(server.URL)
+	defer restoreBase()
 
 	storage, _ := json.Marshal(map[string]any{"accessToken": "tok", "uid": "u-1", "domain": "cn"})
 	res := callOK(t, pluginabi.MethodQuotaFetch, pluginapi.QuotaFetchRequest{
@@ -365,7 +383,7 @@ func TestQuotaFetchReturnsCredits(t *testing.T) {
 	var out pluginapi.QuotaFetchResponse
 	mustDecode(t, res, &out)
 	if len(out.Summary) == 0 || out.Summary[0].Value != 64 {
-		t.Fatalf("summary = %+v", out.Summary)
+		t.Fatalf("summary = %+v (want 64)", out.Summary)
 	}
 	if len(out.Groups) == 0 || len(out.Groups[0].Buckets) == 0 {
 		t.Fatalf("groups = %+v", out.Groups)
@@ -512,12 +530,11 @@ func TestQuotaRefreshEndpoint(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":5,"CycleCapacityRemain":5}]}}}}`))
+		_, _ = w.Write([]byte(`{"data":{"Packages":[{"Resources":[{"PackageCode":"p1","TotalAmount":5,"RemainingAmount":5}]}]}}`))
 	}))
 	defer server.Close()
-	origCheckin := checkinBaseForTest()
-	setCheckinBase(server.URL)
-	defer setCheckinBase(origCheckin)
+	restoreBase := stubCheckinBase(server.URL)
+	defer restoreBase()
 
 	restore := stubHostCall(func(_ string, _ any) (json.RawMessage, error) {
 		return mustMarshal(t, map[string]any{
