@@ -269,31 +269,49 @@ func TestSchedulerPickByCredits(t *testing.T) {
 	}
 }
 
-func TestSchedulerPickRoundRobin(t *testing.T) {
+// TestSchedulerPickRoundRobinDelegates checks that the round_robin strategy
+// hands the decision to CPA's own scheduler rather than running a private
+// cursor: the host's version accounts for priorities and quota state the plugin
+// cannot see, and it survives plugin reloads.
+func TestSchedulerPickRoundRobinDelegates(t *testing.T) {
 	resetState()
 	applyRoutingConfig(routingSettings{Strategy: strategyRoundRobin})
 
-	req := pluginapi.SchedulerPickRequest{
+	payload, _ := json.Marshal(pluginapi.SchedulerPickRequest{
 		Provider: workBuddyProviderKey,
 		Candidates: []pluginapi.SchedulerAuthCandidate{
 			{ID: "a", Provider: workBuddyProviderKey, Status: "active"},
 			{ID: "b", Provider: workBuddyProviderKey, Status: "active"},
 		},
-	}
-	payload, _ := json.Marshal(req)
+	})
 
-	seen := map[string]int{}
-	for i := 0; i < 4; i++ {
-		res := callOK(t, pluginabi.MethodSchedulerPick, json.RawMessage(payload))
-		var out pluginapi.SchedulerPickResponse
-		mustDecode(t, res, &out)
-		if !out.Handled {
-			t.Fatal("should be handled")
-		}
-		seen[out.AuthID]++
+	res := callOK(t, pluginabi.MethodSchedulerPick, json.RawMessage(payload))
+	var out pluginapi.SchedulerPickResponse
+	mustDecode(t, res, &out)
+	if !out.Handled {
+		t.Fatal("should be handled")
 	}
-	if seen["a"] != 2 || seen["b"] != 2 {
-		t.Fatalf("round robin distribution = %v, want 2 each", seen)
+	if out.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+		t.Fatalf("delegate = %q, want %q", out.DelegateBuiltin, pluginapi.SchedulerBuiltinRoundRobin)
+	}
+	if out.AuthID != "" {
+		t.Fatalf("a delegated pick must not also name an auth, got %q", out.AuthID)
+	}
+}
+
+// TestInternalRoundRobinStillWorks covers the private cursor helper, which
+// remains available even though the strategy now delegates.
+func TestInternalRoundRobinStillWorks(t *testing.T) {
+	s := newSchedulerState()
+	cands := []schedulerCandidate{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	seen := map[string]int{}
+	for i := 0; i < 6; i++ {
+		seen[s.pickRoundRobin("codebuddy", cands)]++
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		if seen[id] != 2 {
+			t.Fatalf("distribution = %v, want 2 each", seen)
+		}
 	}
 }
 

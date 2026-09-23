@@ -317,15 +317,28 @@ func schedulerPick(request []byte) ([]byte, error) {
 
 	strategy := state.settings.get().Routing.Strategy
 	var chosen string
+	var delegate string
 	switch strategy {
 	case strategyByExpiry:
 		chosen, _ = pickByExpiryScheduler(req, candidates)
 	case strategyRoundRobin:
-		chosen = state.scheduler.pickRoundRobin(schedulerProviderKey(req), candidates)
+		// Delegate to CPA's own round-robin scheduler instead of tracking a
+		// cursor here: the host's implementation accounts for priorities and
+		// quota state that the plugin cannot see, and it survives plugin
+		// reloads.
+		delegate = pluginapi.SchedulerBuiltinRoundRobin
 	case strategyRandom:
 		chosen = state.scheduler.pickRandom(candidates)
 	default:
 		chosen = pickByCredits(candidates)
+	}
+
+	if delegate != "" {
+		// The host validates the delegate name and performs the selection.
+		return okEnvelope(pluginapi.SchedulerPickResponse{
+			Handled:         true,
+			DelegateBuiltin: delegate,
+		})
 	}
 	if chosen == "" {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
