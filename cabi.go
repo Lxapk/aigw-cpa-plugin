@@ -35,7 +35,7 @@
 //
 // CPA already owns the HTTP server, routing, provider executors and credential
 // pool, so this plugin re-uses those host facilities and only re-implements the
-// pieces that made the AIGW gateway distinctive:
+// pieces that made the source gateway distinctive:
 //
 //   - client API-key gate            (FrontendAuthProvider)   <- V1/o.j()
 //   - model -> provider routing      (RequestInterceptor)     <- V1/o.k() step 6-8
@@ -146,7 +146,12 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	if request != nil && requestLen > 0 {
 		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
-	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
+	// guardRPC contains a panic to this one call. CPA recovers plugin panics, but
+	// it also marks the plugin fused, which skips every later capability and
+	// leaves the user with "unknown provider" for no visible reason.
+	raw, errHandle := guardRPC(C.GoString(method), func() ([]byte, error) {
+		return handleMethod(C.GoString(method), requestBytes)
+	})
 	if errHandle != nil {
 		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error(), 500))
 		return 1

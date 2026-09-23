@@ -131,7 +131,7 @@ func upstreamErrText(upErr upstreamError) string {
 	return upErr.Message
 }
 
-// resolveContext rebuilds the per-request context from the AIGW headers the
+// resolveContext rebuilds the per-request context from the WorkBuddy headers the
 // request interceptor stamped, falling back to whatever CPA supplied.
 func resolveContext(requestID string, headers http.Header, model, requestedModel string, stream bool) requestContext {
 	var ctx requestContext
