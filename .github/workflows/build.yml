@@ -59,12 +59,13 @@ jobs:
       - name: Verify module resolves
         run: go mod download
 
-      - name: Install C compiler (cgo dependency for c-shared build)
+- name: Install C compiler (cgo dependency for c-shared build)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc libc6-dev
-          echo "CC=$(which gcc)" >> "$GITHUB_ENV"
+          sudo apt-get install -y -qq build-essential
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "CGO_ENABLED=1" >> "$GITHUB_ENV"
 
       - name: Run unit tests
         run: CGO_ENABLED=0 go test ./... -count=1
