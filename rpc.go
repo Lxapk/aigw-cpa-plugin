@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "aigw-reverse-proxy"
-	pluginVersion = "0.3.2"
+	pluginVersion = "0.4.0"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -107,6 +107,11 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		}
 		if errDecode := state.settings.decodeLifecycleConfig(req.ConfigYAML); errDecode != nil {
 			return nil, errDecode
+		}
+		// Bring up the check-in scheduler so the configured schedule is honoured
+		// for the lifetime of this plugin instance.
+		if state.settings.get().Checkin.Enabled {
+			startCheckinScheduler()
 		}
 		return okEnvelope(buildRegistration())
 

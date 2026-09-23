@@ -724,10 +724,12 @@ func TestParseRequestMeta(t *testing.T) {
 
 // resetState reinstalls pristine singleton state between tests.
 func resetState() {
+	stopCheckinScheduler()
 	state = &globalState{
 		settings: newSettingsStore(),
 		pool:     newCredentialPool(),
 		log:      newCallLog(100),
+		checkin:  newCheckinState(),
 	}
 	inflight = newInflightMap()
 	streamAccumulators.mu.Lock()

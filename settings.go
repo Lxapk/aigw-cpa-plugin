@@ -73,10 +73,12 @@ type gatewaySettings struct {
 	EnforceDefaultProvider bool `json:"enforce_default_provider" yaml:"enforce_default_provider"`
 	// Debug enables verbose host logging.
 	Debug bool `json:"debug" yaml:"debug"`
+	// Checkin holds the daily check-in configuration (nested under "checkin").
+	Checkin checkinSettings `json:"checkin" yaml:"checkin"`
 }
 
 // defaultGatewaySettings returns the exact defaults of V1.s's synthetic
-// no-arg constructor.
+// no-arg constructor, plus this plugin's own additions.
 func defaultGatewaySettings() gatewaySettings {
 	return gatewaySettings{
 		Port:                8790,
@@ -92,6 +94,7 @@ func defaultGatewaySettings() gatewaySettings {
 		ErrorCooldownMillis: 600_000,
 		LogRetentionDays:    30,
 		DefaultProvider:     "trae",
+		Checkin:             defaultCheckinSettings(),
 	}
 }
 
@@ -128,6 +131,31 @@ func (g *gatewaySettings) applyDefaults() {
 		g.DefaultProvider = d.DefaultProvider
 	}
 	g.APIKey = strings.TrimSpace(g.APIKey)
+
+	// The check-in block is nested, so YAML decoding replaces it wholesale with
+	// the zero value when the section is absent. Restore the defaults in that
+	// case so an empty config does not silently schedule 00:00.
+	g.Checkin.applyDefaults()
+}
+
+// applyDefaults fills the check-in block with sensible values when it was not
+// configured. Everything except Enabled/OnStart is range-checked rather than
+// defaulted, so an explicit 0 is still honoured for Minute.
+func (c *checkinSettings) applyDefaults() {
+	d := defaultCheckinSettings()
+	if c.Hour < 0 || c.Hour > 23 {
+		c.Hour = d.Hour
+	}
+	if c.Minute < 0 || c.Minute > 59 {
+		c.Minute = d.Minute
+	}
+	// A completely unset block (all zero) is indistinguishable from "midnight"
+	// in YAML, so treat "disabled + 00:00" as "not configured" and restore the
+	// documented 09:00 default.
+	if !c.Enabled && c.Hour == 0 && c.Minute == 0 {
+		c.Hour = d.Hour
+		c.Minute = d.Minute
+	}
 }
 
 // settingsStore holds the live settings. The host re-sends the plugin config on
@@ -158,6 +186,13 @@ func (s *settingsStore) set(v gatewaySettings) {
 	s.mu.Lock()
 	s.val = v
 	s.mu.Unlock()
+}
+
+// setCheckin replaces only the check-in block, leaving gateway settings intact.
+func (s *settingsStore) setCheckin(cfg checkinSettings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.val.Checkin = cfg
 }
 
 // lifecycleRequest is the payload CPA sends for plugin.register /

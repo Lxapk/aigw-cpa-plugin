@@ -13,19 +13,19 @@ import (
 //	kind(f2.b), statusCode, promptTokens, completionTokens, totalTokens,
 //	latencyMillis, errorText, responsePreview(<=8192), requestPreview(<=8192)
 type callRecord struct {
-	ProviderID     string    `json:"provider_id"`
-	UID            string    `json:"uid"`
-	Label          string    `json:"label"`
-	Model          string    `json:"model"`
-	RequestedModel string    `json:"requested_model"`
-	Stream         bool      `json:"stream"`
-	StatusCode     int       `json:"status_code"`
-	PromptTokens   int64     `json:"prompt_tokens"`
-	CompletionTokens int64   `json:"completion_tokens"`
-	TotalTokens    int64     `json:"total_tokens"`
-	LatencyMillis  int64     `json:"latency_millis"`
-	Error          string    `json:"error,omitempty"`
-	StartedAt      time.Time `json:"started_at"`
+	ProviderID       string    `json:"provider_id"`
+	UID              string    `json:"uid"`
+	Label            string    `json:"label"`
+	Model            string    `json:"model"`
+	RequestedModel   string    `json:"requested_model"`
+	Stream           bool      `json:"stream"`
+	StatusCode       int       `json:"status_code"`
+	PromptTokens     int64     `json:"prompt_tokens"`
+	CompletionTokens int64     `json:"completion_tokens"`
+	TotalTokens      int64     `json:"total_tokens"`
+	LatencyMillis    int64     `json:"latency_millis"`
+	Error            string    `json:"error,omitempty"`
+	StartedAt        time.Time `json:"started_at"`
 }
 
 // callLog ports V1.f2.C1121t: a bounded, newest-first ring of call records
@@ -35,12 +35,12 @@ type callLog struct {
 	max  int
 	recs []callRecord
 
-	totalCalls   int64
-	totalFailed  int64
-	totalPrompt  int64
-	totalCompl   int64
-	todayCalls   int64
-	todayDate    string
+	totalCalls  int64
+	totalFailed int64
+	totalPrompt int64
+	totalCompl  int64
+	todayCalls  int64
+	todayDate   string
 }
 
 func newCallLog(max int) *callLog {
@@ -91,11 +91,11 @@ func (l *callLog) recent(limit int) []callRecord {
 }
 
 type usageTotals struct {
-	TotalCalls       int64 `json:"total_calls"`
-	TotalFailed      int64 `json:"total_failed"`
-	TodayCalls       int64 `json:"today_calls"`
-	TotalPrompt      int64 `json:"total_prompt_tokens"`
-	TotalCompletion  int64 `json:"total_completion_tokens"`
+	TotalCalls      int64 `json:"total_calls"`
+	TotalFailed     int64 `json:"total_failed"`
+	TodayCalls      int64 `json:"today_calls"`
+	TotalPrompt     int64 `json:"total_prompt_tokens"`
+	TotalCompletion int64 `json:"total_completion_tokens"`
 }
 
 func (l *callLog) totals() usageTotals {
@@ -142,14 +142,16 @@ type globalState struct {
 	settings *settingsStore
 	pool     *credentialPool
 	log      *callLog
+	checkin  *checkinState
 }
 
 var state = &globalState{
 	settings: newSettingsStore(),
 	pool:     newCredentialPool(),
 	log:      newCallLog(100),
+	checkin:  newCheckinState(),
 }
 
 func shutdownPlugin() {
-	// Nothing to release: all state is in-process and GC-managed.
+	stopCheckinScheduler()
 }

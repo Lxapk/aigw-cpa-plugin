@@ -26,6 +26,11 @@ func managementRegistration() managementRegistrationResponse {
 				Menu:        "AIGW 反向代理",
 				Description: "AI 聚合网关反向代理插件状态：路由设置、账号池冷却、调用统计。",
 			},
+			{
+				Path:        "/checkin",
+				Menu:        "AIGW 签到",
+				Description: "WorkBuddy 每日签到：手动立即签到、配置自动签到、查看结果。",
+			},
 		},
 		Routes: []pluginapi.ManagementRoute{
 			{
@@ -37,6 +42,21 @@ func managementRegistration() managementRegistrationResponse {
 				Method:      http.MethodGet,
 				Path:        "/aigw-reverse-proxy/calls",
 				Description: "Recent reverse-proxy calls recorded by the AIGW plugin.",
+			},
+			{
+				Method:      http.MethodGet,
+				Path:        "/aigw-reverse-proxy/checkin/status",
+				Description: "WorkBuddy check-in configuration and recent results.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/checkin/run",
+				Description: "Run a manual WorkBuddy check-in for every account.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/aigw-reverse-proxy/checkin/config",
+				Description: "Update the automatic check-in schedule.",
 			},
 		},
 	}
@@ -55,6 +75,16 @@ func handleManagement(request []byte) ([]byte, error) {
 	// Strip the plugin resource prefix when CPA passes the full path.
 	if idx := strings.Index(path, "/aigw-reverse-proxy"); idx >= 0 {
 		path = path[idx+len("/aigw-reverse-proxy"):]
+	}
+	// Check-in endpoints are handled separately so this dispatch stays readable.
+	if resp, handled := handleCheckinRequest(pluginapi.ManagementRequest{
+		Method:  req.Method,
+		Path:    req.Path,
+		Headers: req.Headers,
+		Query:   req.Query,
+		Body:    req.Body,
+	}); handled {
+		return okEnvelope(resp)
 	}
 	if strings.HasSuffix(path, "/status") {
 		path = "/status"
@@ -150,20 +180,20 @@ func statusSnapshot() map[string]any {
 
 	return map[string]any{
 		"plugin": map[string]any{
-			"name":             pluginName,
-			"version":          pluginVersion,
-			"author":           pluginAuthor,
-			"source_app":       "AI 聚合网关 0.1.18 (dev.aigw.app)",
-			"registrations":    state.settings.registrations.Load(),
-			"schema_version":   6,
+			"name":              pluginName,
+			"version":           pluginVersion,
+			"author":            pluginAuthor,
+			"source_app":        "AI 聚合网关 0.1.18 (dev.aigw.app)",
+			"registrations":     state.settings.registrations.Load(),
+			"schema_version":    6,
 			"port_owned_by_cpa": true,
 		},
-		"settings":        settings.marshalForLog(),
-		"providers":       providerList,
-		"accounts":        lanes,
-		"usage":           state.log.totals(),
-		"recent_calls":    state.log.recent(10),
-		"server_time":     now.Format(time.RFC3339),
+		"settings":     settings.marshalForLog(),
+		"providers":    providerList,
+		"accounts":     lanes,
+		"usage":        state.log.totals(),
+		"recent_calls": state.log.recent(10),
+		"server_time":  now.Format(time.RFC3339),
 	}
 }
 

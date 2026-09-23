@@ -63,6 +63,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"unsafe"
 )
 
@@ -371,7 +372,92 @@ func main() {
 	}
 	ok("model.route claims explicit codebuddy/ prefix")
 
-	// --- 12. shutdown ---------------------------------------------------
+	// --- 12. check-in capability ----------------------------------------
+	// The check-in scheduler and endpoints live behind the management API.
+	mgmtReg := call(plugin, "management.register", json.RawMessage(`{}`))
+	assertOK(mgmtReg, "management.register")
+	var mgmtRegOut struct {
+		Resources []struct {
+			Path string `json:"path"`
+			Menu string `json:"menu"`
+		} `json:"resources"`
+	}
+	mustUnmarshal(mgmtReg.Result, &mgmtRegOut)
+
+	var sawCheckin bool
+	for _, r := range mgmtRegOut.Resources {
+		if r.Path == "/checkin" {
+			sawCheckin = true
+		}
+	}
+	if !sawCheckin {
+		die("check-in resource not registered: %+v", mgmtRegOut.Resources)
+	}
+	ok("check-in resource registered (%d resources)", len(mgmtRegOut.Resources))
+
+	// Status endpoint must answer with the expected fields.
+	ckStatus := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/checkin/status","Headers":{"Accept":["application/json"]}}`))
+	assertOK(ckStatus, "management.handle(/checkin/status)")
+	var ckStatusEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(ckStatus.Result, &ckStatusEnv)
+	if ckStatusEnv.StatusCode != 200 {
+		die("check-in status code = %d", ckStatusEnv.StatusCode)
+	}
+	var ckDoc map[string]any
+	mustUnmarshal(ckStatusEnv.Body, &ckDoc)
+	for _, key := range []string{"enabled", "hour", "minute", "running", "history"} {
+		if _, okKey := ckDoc[key]; !okKey {
+			die("check-in status missing %q: %s", key, ckStatusEnv.Body)
+		}
+	}
+	ok("checkin/status -> enabled=%v hour=%v minute=%v", ckDoc["enabled"], ckDoc["hour"], ckDoc["minute"])
+
+	// The HTML page must render the manual + automatic controls.
+	ckPage := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/checkin","Headers":{"Accept":["text/html"]}}`))
+	assertOK(ckPage, "management.handle(/checkin)")
+	var ckPageEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(ckPage.Result, &ckPageEnv)
+	page := string(ckPageEnv.Body)
+	for _, want := range []string{"手动签到", "自动签到", "立即为所有账号签到"} {
+		if !strings.Contains(page, want) {
+			die("check-in page missing %q", want)
+		}
+	}
+	ok("checkin page renders manual button + auto schedule form (%d bytes)", len(page))
+
+	// Triggering a manual run without any host credentials must not crash: the
+	// smoke host implements no host.auth.list, so the run reports the account
+	// lookup failure cleanly.
+	ckRun := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/resource/plugins/aigw-reverse-proxy/checkin/run"}`))
+	assertOK(ckRun, "management.handle(/checkin/run)")
+	var ckRunEnv struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       []byte `json:"Body"`
+	}
+	mustUnmarshal(ckRun.Result, &ckRunEnv)
+	if ckRunEnv.StatusCode != 200 {
+		die("check-in run status = %d (%s)", ckRunEnv.StatusCode, ckRunEnv.Body)
+	}
+	var runDoc struct {
+		Trigger string `json:"trigger"`
+		Total   int    `json:"total"`
+		Results []struct {
+			Error string `json:"error"`
+		} `json:"results"`
+	}
+	mustUnmarshal(ckRunEnv.Body, &runDoc)
+	if runDoc.Trigger != "manual" {
+		die("run trigger = %q", runDoc.Trigger)
+	}
+	ok("checkin/run -> trigger=%s total=%d (graceful without host auth)", runDoc.Trigger, runDoc.Total)
+
+	// --- 13. shutdown ---------------------------------------------------
 	C.call_shutdown(&plugin)
 	ok("cliproxy_plugin_shutdown returned cleanly")
 

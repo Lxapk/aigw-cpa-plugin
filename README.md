@@ -101,6 +101,123 @@ CPA 已经自带 HTTP 服务器、路由、provider 执行器与凭据池。把�
 | **`a2/b.java:745` 模型目录** | **`model_provider.go` / `workbuddy_client.go`** | **`ModelProvider`** |
 | **`a2/b.java:335` 上游对话** | **`executor.go` / `workbuddy_client.go`** | **`ProviderExecutor`** |
 | **`V1/o.k` step 6 路由分发** | **`model_router.go`** | **`ModelRouter`** |
+| **`a2/b.java:496` 每日签到** | **`checkin.go` / `checkin_client.go` / `checkin_page.go`** | **`ManagementAPI`** |
+
+---
+
+## 2.7 WorkBuddy 每日签到（v0.4.0 新增）
+
+在插件管理面板新增「**AIGW 签到**」页面，支持**手动立即签到**与**每日自动签到**。
+
+### 源 APK 调用链
+
+```
+UI「批量签到」(N1/C0290r0.java:148)
+  → N1/i1.java:35   engine.h("codebuddy", uid, "checkin", cb)
+  → N1/C0284o.java  engine.i(providerId, uid, "checkin", cb)
+  → V1/k.java:462   provider.e(account, "checkin", cb)
+  → a2/b.java:496   e(account, action, cb)      ← 1375 指令，jadx 反不了，读 smali
+```
+
+### 签到接口（smali `a2/b.smali:2643`）
+
+```
+POST {checkinBase}/v2/billing/meter/daily-checkin
+     body: {}
+     checkinBase = domain=="global" ? https://www.workbuddy.ai : https://www.codebuddy.cn
+```
+
+> ⚠️ **签到域名与对话域名不同**：cn 域下对话走 `copilot.tencent.com`，
+> 而签到走 `www.codebuddy.cn`。两者不能混用。
+
+两个域名都已实测存在（无 token 返回 401）。
+
+### 响应判定（smali 2676-2919 逐行还原）
+
+```
+HTTP 非 2xx  →  失败："签到失败（HTTP <status>）：<body>"
+
+HTTP 2xx:
+  code = body.code   （缺失/不可解析 → -1）
+
+  code == 0                        →  ✅ "签到成功"
+  code != 0 且 body 含 "已签到"
+              或 含 "already"      →  ✅ "今日已签到"（幂等，视为成功）
+  其它                             →  ❌ message 字段 或 "签到失败（code=N）"
+```
+
+与源 APK 完全一致：**"今日已签到"也算成功**，所以重复签到不会报错。
+
+### 手动签到
+
+打开 `http://你的服务器:8317/management.html` → **AIGW 签到** → 点「**立即为所有账号签到**」。
+
+插件会：
+
+1. 通过 `host.auth.list` 读取 CPA 里所有 `codebuddy` 账号
+2. 逐个调用 `daily-checkin`
+3. 在页面上列出每个账号的结果（成功 / 已签到 / 失败 + 原因 + code）
+
+### 自动签到
+
+同一页面配置：
+
+| 项 | 说明 |
+|---|---|
+| **启用每日自动签到** | 总开关，默认**关闭** |
+| **每天 N 时 M 分执行** | 本地时区，默认 09:00 |
+| **启动时补跑** | 当天尚未执行过时，插件加载后立即补一次 |
+
+调度由插件内的轻量循环驱动（每分钟探测一次），并用「当天已跑」标记保证
+**每天至多执行一次**，不依赖 cron。
+
+### 配置文件写法
+
+```yaml
+plugins:
+  configs:
+    aigw-reverse-proxy:
+      # ... 其它配置 ...
+      checkin:
+        enabled: true          # 打开自动签到
+        hour: 9                # 每天 9 点
+        minute: 0
+        on_start: true         # 启动时补跑
+        retry_on_device_fingerprint: true   # 设备指纹失败后 8s 重试一次
+```
+
+> 面板上的开关与配置文件是同一份状态：面板保存后会立即生效（启用时自动启动调度器）。
+
+### 关于「设备指纹」重试
+
+源 APK 在签到被上游以 code **9074**（设备指纹未通过）拒绝时，会 `sleep 8s` 后**重试一次**
+（`d2/C0482C.java` 的 `catch (w e5) { if (e5.f != 9074) throw e5; Thread.sleep(8000L); ... }`）。
+插件保留了这个行为，由 `retry_on_device_fingerprint` 控制，默认开启。
+
+### HTTP 接口（脚本/自动化调用）
+
+```bash
+# 查看配置与历史
+curl -s http://127.0.0.1:8317/v0/management/aigw-reverse-proxy/checkin/status
+
+# 触发一次手动签到
+curl -s -X POST http://127.0.0.1:8317/v0/management/aigw-reverse-proxy/checkin/run
+
+# 修改自动签到配置
+curl -s -X POST http://127.0.0.1:8317/v0/management/aigw-reverse-proxy/checkin/config \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"hour":9,"minute":0,"on_start":true}'
+```
+
+### 排障
+
+| 现象 | 原因 |
+|---|---|
+| 「没有可签到的 WorkBuddy 账号」 | CPA 的 auth 存储里没有 codebuddy 账号，先去「认证」页登录 |
+| 「读取账号失败」 | `host.auth.list` 不可用（宿主版本过旧） |
+| 每个账号都失败 `签到失败（HTTP 401）` | WorkBuddy token 失效，重新登录 |
+| `签到失败（code=9074）` | 设备指纹被拒；已自动重试一次仍失败时需重新登录该账号 |
+| 自动签到没触发 | 确认 `enabled: true`，且插件在配置的**当天该时刻之后**处于运行状态；可用「启动时补跑」兜底 |
 
 > 账号池的**轮换重试**由 CPA 自己的 auth 轮换机制承担；插件负责把源应用的**冷却策略**
 > （硬冷却 / 软冷却 / 永久停用）准确地喂给响应 hook。
