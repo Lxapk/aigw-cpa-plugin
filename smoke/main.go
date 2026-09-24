@@ -1,4 +1,4 @@
-// Command smoke loads dist/aigw-reverse-proxy.so through the same C ABI surface
+// Command smoke loads dist/workbuddy.so through the same C ABI surface
 // CLIProxyAPI's pluginhost uses (dlopen + cliproxy_plugin_init) and replays a
 // real RPC conversation against it.
 //
@@ -72,7 +72,7 @@ import (
 // smoke test wires a callback-less host (nil function pointers), which the
 // plugin tolerates because none of the exercised code paths emit host RPCs.
 func main() {
-	libPath := "dist/aigw-reverse-proxy.so"
+	libPath := "dist/workbuddy.so"
 	if len(os.Args) > 1 {
 		libPath = os.Args[1]
 	}
@@ -126,8 +126,8 @@ func main() {
 		Capabilities map[string]any `json:"capabilities"`
 	}
 	mustUnmarshal(regResp.Result, &reg)
-	if len(reg.Metadata.ConfigFields) != 17 {
-		die("expected 17 config fields, got %d", len(reg.Metadata.ConfigFields))
+	if len(reg.Metadata.ConfigFields) != 18 {
+		die("expected 18 config fields, got %d", len(reg.Metadata.ConfigFields))
 	}
 	ok("registered %s v%s (schema=%d, config_fields=%d)", reg.Metadata.Name, reg.Metadata.Version, reg.SchemaVersion, len(reg.Metadata.ConfigFields))
 	for _, cap := range []string{"frontend_auth_provider", "request_interceptor", "response_interceptor", "response_stream_interceptor", "usage_plugin", "management_api"} {
@@ -196,7 +196,7 @@ func main() {
 	ok("usage recorded")
 
 	// --- 8. management status ------------------------------------------
-	mgmtResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/status","Headers":{"Accept":["application/json"]}}`))
+	mgmtResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/workbuddy/status","Headers":{"Accept":["application/json"]}}`))
 	assertOK(mgmtResp, "management.handle")
 	var mgmt struct {
 		StatusCode int    `json:"StatusCode"`
@@ -395,7 +395,7 @@ func main() {
 	ok("combined page resource registered (%d resources)", len(mgmtRegOut.Resources))
 
 	// Status endpoint must answer with the expected fields.
-	ckStatus := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/checkin/status","Headers":{"Accept":["application/json"]}}`))
+	ckStatus := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/workbuddy/checkin/status","Headers":{"Accept":["application/json"]}}`))
 	assertOK(ckStatus, "management.handle(/checkin/status)")
 	var ckStatusEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -415,7 +415,7 @@ func main() {
 	ok("checkin/status -> enabled=%v hour=%v minute=%v", ckDoc["enabled"], ckDoc["hour"], ckDoc["minute"])
 
 	// The HTML page must render the manual + automatic controls.
-	ckPage := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/checkin","Headers":{"Accept":["text/html"]}}`))
+	ckPage := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/workbuddy/checkin","Headers":{"Accept":["text/html"]}}`))
 	assertOK(ckPage, "management.handle(/checkin)")
 	var ckPageEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -443,7 +443,7 @@ func main() {
 	ok("checkin page renders (localStorage key + controls) (%d bytes)", len(page))
 
 	// The config endpoint the page's fetch() calls must work.
-	ckCfg := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/checkin/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJlbmFibGVkIjpmYWxzZSwiaG91ciI6OSwibWludXRlIjowfQ=="}`))
+	ckCfg := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/workbuddy/checkin/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJlbmFibGVkIjpmYWxzZSwiaG91ciI6OSwibWludXRlIjowfQ=="}`))
 	assertOK(ckCfg, "management.handle(POST /checkin/config)")
 	var ckCfgEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -458,7 +458,7 @@ func main() {
 	// Triggering a manual run without any host credentials must not crash: the
 	// smoke host implements no host.auth.list, so the run reports the account
 	// lookup failure cleanly.
-	ckRun := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/resource/plugins/aigw-reverse-proxy/checkin/run"}`))
+	ckRun := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/resource/plugins/workbuddy/checkin/run"}`))
 	assertOK(ckRun, "management.handle(/checkin/run)")
 	var ckRunEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -520,7 +520,7 @@ func main() {
 		quotaDescOut.SupportedProviders, quotaDescOut.DisplayName, quotaDescOut.SupportsReset)
 
 	// The quota page and its endpoints.
-	quotaStatus := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/aigw-reverse-proxy/quota/status"}`))
+	quotaStatus := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/workbuddy/quota/status"}`))
 	assertOK(quotaStatus, "management.handle(/quota/status)")
 	var quotaStatusEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -540,7 +540,7 @@ func main() {
 	ok("quota/status -> enabled=%v interval=%vmin total=%v",
 		quotaDoc["enabled"], quotaDoc["interval_minutes"], quotaDoc["total_credits"])
 
-	quotaPage := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/quota","Headers":{"Accept":["text/html"]}}`))
+	quotaPage := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/workbuddy/quota","Headers":{"Accept":["text/html"]}}`))
 	assertOK(quotaPage, "management.handle(/quota)")
 	var quotaPageEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -562,7 +562,7 @@ func main() {
 	// The account list must be readable straight from the auth store, so a
 	// freshly logged-in account shows up without any traffic, and only
 	// WorkBuddy entries may appear.
-	homeResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/aigw-reverse-proxy/","Headers":{"Accept":["text/html"]}}`))
+	homeResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/resource/plugins/workbuddy/","Headers":{"Accept":["text/html"]}}`))
 	assertOK(homeResp, "management.handle(/ combined page)")
 	var homeEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -583,7 +583,7 @@ func main() {
 	}
 	ok("combined page renders all sections (%d bytes, no forms)", len(home))
 
-	accountsResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/aigw-reverse-proxy/accounts"}`))
+	accountsResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/workbuddy/accounts"}`))
 	assertOK(accountsResp, "management.handle(/accounts)")
 	var accountsEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -648,7 +648,7 @@ func main() {
 	for _, strategy := range []string{"by_expiry", "round_robin", "random", "by_credits"} {
 		body, _ := json.Marshal(map[string]string{"strategy": strategy})
 		cfgResp := call(plugin, "management.handle", json.RawMessage(
-			`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"`+
+			`{"Method":"POST","Path":"/v0/management/workbuddy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"`+
 				base64Std(string(body))+`"}`))
 		assertOK(cfgResp, "management.handle(/routing/config "+strategy+")")
 	}
@@ -657,7 +657,7 @@ func main() {
 	// round_robin must delegate to CPA's built-in scheduler rather than running
 	// a private cursor, so the host's priority/quota awareness is preserved.
 	// Select it explicitly: the loop above ends on by_credits.
-	setRR := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6InJvdW5kX3JvYmluIn0="}`))
+	setRR := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/workbuddy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6InJvdW5kX3JvYmluIn0="}`))
 	assertOK(setRR, "routing/config round_robin")
 	deleg := call(plugin, "scheduler.pick", json.RawMessage(`{"Provider":"codebuddy","Candidates":[{"ID":"a","Provider":"codebuddy","Status":"active"}]}`))
 	assertOK(deleg, "scheduler.pick(round_robin delegate)")
@@ -675,7 +675,7 @@ func main() {
 	}
 	ok("by delegation -> DelegateBuiltin=%s (host performs the selection)", delegOut.DelegateBuiltin)
 
-	routingResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/aigw-reverse-proxy/routing/status"}`))
+	routingResp := call(plugin, "management.handle", json.RawMessage(`{"Method":"GET","Path":"/v0/management/workbuddy/routing/status"}`))
 	assertOK(routingResp, "management.handle(/routing/status)")
 	var routingEnv struct {
 		StatusCode int    `json:"StatusCode"`
@@ -701,7 +701,7 @@ func main() {
 	// current account is "a", so a two-candidate request may legitimately come
 	// back unhandled. A single candidate that is not current proves the path
 	// works without depending on that state.
-	setStrategy := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6ImJ5X2V4cGlyeSJ9"}`))
+	setStrategy := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/workbuddy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6ImJ5X2V4cGlyeSJ9"}`))
 	assertOK(setStrategy, "routing/config by_expiry")
 	expiryPick := call(plugin, "scheduler.pick", json.RawMessage(`{"Provider":"codebuddy","Candidates":[{"ID":"fresh-account","Provider":"codebuddy","Status":"active"}]}`))
 	assertOK(expiryPick, "scheduler.pick(by_expiry)")
@@ -729,7 +729,7 @@ func main() {
 	ok("by_expiry gate chain refuses to re-select the current account")
 
 	// Restore the default strategy for the remaining checks.
-	restoreStrategy := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/aigw-reverse-proxy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6ImJ5X2NyZWRpdHMifQ=="}`))
+	restoreStrategy := call(plugin, "management.handle", json.RawMessage(`{"Method":"POST","Path":"/v0/management/workbuddy/routing/config","Headers":{"Content-Type":["application/json"]},"Body":"eyJzdHJhdGVneSI6ImJ5X2NyZWRpdHMifQ=="}`))
 	assertOK(restoreStrategy, "routing/config by_credits")
 
 	// --- 17. shutdown ---------------------------------------------------

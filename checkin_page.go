@@ -128,7 +128,7 @@ func normaliseManagementPath(path string) string {
 	for _, prefix := range []string{
 		"/v0/resource/plugins/" + pluginName,
 		"/v0/management/" + pluginName,
-		"/v0/resource/plugins/aigw-reverse-proxy",
+		"/v0/resource/plugins/workbuddy",
 	} {
 		if strings.HasPrefix(p, prefix) {
 			return strings.TrimPrefix(p, prefix)

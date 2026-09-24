@@ -1,5 +1,5 @@
 // Package main implements the CLIProxyAPI (CPA) dynamic plugin
-// "aigw-reverse-proxy".
+// "workbuddy".
 //
 // It re-implements behaviour extracted from the Android app
 // "AI 聚合网关" (package dev.aigw.app, version 0.1.18).

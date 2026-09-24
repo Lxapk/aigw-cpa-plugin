@@ -676,7 +676,7 @@ func TestManagementRegistrationAndStatus(t *testing.T) {
 
 	res = callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method:  http.MethodGet,
-		Path:    "/v0/resource/plugins/aigw-reverse-proxy/status",
+		Path:    "/v0/resource/plugins/workbuddy/status",
 		Headers: http.Header{"Accept": []string{"application/json"}},
 	})
 	var mr managementResponse
@@ -704,7 +704,7 @@ func TestManagementStatusHTML(t *testing.T) {
 	callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{})
 	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method:  http.MethodGet,
-		Path:    "/v0/resource/plugins/aigw-reverse-proxy/status",
+		Path:    "/v0/resource/plugins/workbuddy/status",
 		Headers: http.Header{"Accept": []string{"text/html"}},
 	})
 	var mr managementResponse

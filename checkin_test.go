@@ -480,7 +480,7 @@ func TestCheckinStatusEndpoint(t *testing.T) {
 	resetState()
 	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method:  http.MethodGet,
-		Path:    "/v0/resource/plugins/aigw-reverse-proxy/checkin/status",
+		Path:    "/v0/resource/plugins/workbuddy/checkin/status",
 		Headers: http.Header{"Accept": []string{"application/json"}},
 	})
 	var mr managementResponse
@@ -503,7 +503,7 @@ func TestCheckinPageRenders(t *testing.T) {
 	resetState()
 	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method:  http.MethodGet,
-		Path:    "/v0/resource/plugins/aigw-reverse-proxy/checkin",
+		Path:    "/v0/resource/plugins/workbuddy/checkin",
 		Headers: http.Header{"Accept": []string{"text/html"}},
 	})
 	var mr managementResponse
@@ -523,7 +523,7 @@ func TestCheckinRunEndpointRequiresPost(t *testing.T) {
 	resetState()
 	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/aigw-reverse-proxy/checkin/run",
+		Path:   "/v0/resource/plugins/workbuddy/checkin/run",
 	})
 	var mr managementResponse
 	mustDecode(t, res, &mr)
@@ -554,7 +554,7 @@ func TestCheckinRunEndpointRuns(t *testing.T) {
 
 	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method: http.MethodPost,
-		Path:   "/v0/resource/plugins/aigw-reverse-proxy/checkin/run",
+		Path:   "/v0/resource/plugins/workbuddy/checkin/run",
 	})
 	var mr managementResponse
 	mustDecode(t, res, &mr)
@@ -574,7 +574,7 @@ func TestCheckinConfigEndpointSaves(t *testing.T) {
 	resetState()
 	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method: http.MethodPost,
-		Path:   "/v0/resource/plugins/aigw-reverse-proxy/checkin/config",
+		Path:   "/v0/resource/plugins/workbuddy/checkin/config",
 		Body:   []byte(`{"enabled":true,"hour":7,"minute":30,"on_start":true}`),
 	})
 	var mr managementResponse
@@ -601,7 +601,7 @@ func TestCheckinConfigEndpointClampsValues(t *testing.T) {
 	resetState()
 	callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method: http.MethodPost,
-		Path:   "/v0/resource/plugins/aigw-reverse-proxy/checkin/config",
+		Path:   "/v0/resource/plugins/workbuddy/checkin/config",
 		Body:   []byte(`{"hour":99,"minute":99}`),
 	})
 	cfg := state.settings.get().Checkin
@@ -614,7 +614,7 @@ func TestCheckinConfigEndpointAcceptsNestedShape(t *testing.T) {
 	resetState()
 	callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
 		Method: http.MethodPost,
-		Path:   "/v0/resource/plugins/aigw-reverse-proxy/checkin/config",
+		Path:   "/v0/resource/plugins/workbuddy/checkin/config",
 		Body:   []byte(`{"checkin":{"enabled":true,"hour":6}}`),
 	})
 	cfg := state.settings.get().Checkin

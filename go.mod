@@ -1,4 +1,4 @@
-module github.com/taixu/aigw-reverse-proxy
+module github.com/Lxapk/workbuddy
 
 go 1.26.0
 

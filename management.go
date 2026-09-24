@@ -40,7 +40,7 @@ func managementRegistration() managementRegistrationResponse {
 		Routes: []pluginapi.ManagementRoute{
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/accounts",
+				Path:        "/workbuddy/accounts",
 				Description: "WorkBuddy account list as JSON (read from the auth store).",
 			},
 			// Account-switching strategy endpoints. The panel's strategy
@@ -48,79 +48,79 @@ func managementRegistration() managementRegistrationResponse {
 			// buttons silently do nothing.
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/routing/status",
+				Path:        "/workbuddy/routing/status",
 				Description: "Current account-switching strategy and selection order.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/routing/config",
+				Path:        "/workbuddy/routing/config",
 				Description: "Update the account-switching strategy.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/routing/reset",
+				Path:        "/workbuddy/routing/reset",
 				Description: "Reset the round-robin rotation cursor.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/run",
+				Path:        "/workbuddy/run",
 				Description: "Run check-in and quota refresh in one call.",
 			},
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/status",
+				Path:        "/workbuddy/status",
 				Description: "WorkBuddy plugin status as JSON.",
 			},
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/calls",
+				Path:        "/workbuddy/calls",
 				Description: "Recent reverse-proxy calls recorded by the WorkBuddy plugin.",
 			},
 			// The check-in page itself is also mounted on the management path so
 			// the browser can land there directly (and after a form POST).
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/checkin",
+				Path:        "/workbuddy/checkin",
 				Description: "WorkBuddy check-in page.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/checkin",
+				Path:        "/workbuddy/checkin",
 				Description: "Handle check-in form submissions (run / save).",
 			},
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/checkin/status",
+				Path:        "/workbuddy/checkin/status",
 				Description: "WorkBuddy check-in configuration and recent results.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/checkin/run",
+				Path:        "/workbuddy/checkin/run",
 				Description: "Run a manual WorkBuddy check-in for every account.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/checkin/config",
+				Path:        "/workbuddy/checkin/config",
 				Description: "Update the automatic check-in schedule.",
 			},
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/quota",
+				Path:        "/workbuddy/quota",
 				Description: "WorkBuddy quota page.",
 			},
 			{
 				Method:      http.MethodGet,
-				Path:        "/aigw-reverse-proxy/quota/status",
+				Path:        "/workbuddy/quota/status",
 				Description: "WorkBuddy quota status as JSON.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/quota/refresh",
+				Path:        "/workbuddy/quota/refresh",
 				Description: "Refresh WorkBuddy quota for every account.",
 			},
 			{
 				Method:      http.MethodPost,
-				Path:        "/aigw-reverse-proxy/quota/config",
+				Path:        "/workbuddy/quota/config",
 				Description: "Update the automatic quota refresh interval.",
 			},
 		},
@@ -138,8 +138,8 @@ func handleManagement(request []byte) ([]byte, error) {
 
 	path := strings.TrimSuffix(strings.TrimSpace(req.Path), "/")
 	// Strip the plugin resource prefix when CPA passes the full path.
-	if idx := strings.Index(path, "/aigw-reverse-proxy"); idx >= 0 {
-		path = path[idx+len("/aigw-reverse-proxy"):]
+	if idx := strings.Index(path, "/workbuddy"); idx >= 0 {
+		path = path[idx+len("/workbuddy"):]
 	}
 	// The combined view and its JSON endpoints.
 	if resp, handled := handleMainRequest(pluginapi.ManagementRequest{

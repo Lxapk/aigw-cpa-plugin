@@ -85,6 +85,9 @@ type gatewaySettings struct {
 	Quota quotaSettings `json:"quota" yaml:"quota"`
 	// Routing holds the account-selection strategy (nested under "routing").
 	Routing routingSettings `json:"routing" yaml:"routing"`
+	// VariantOverride forces accounts to use a specific variant.
+	// "" = auto (per-account domain), "cn" = force domestic, "ai" = force international.
+	VariantOverride string `json:"variant_override" yaml:"variant_override"`
 }
 
 // defaultGatewaySettings returns the exact defaults of V1.s's synthetic
@@ -107,6 +110,7 @@ func defaultGatewaySettings() gatewaySettings {
 		Checkin:             defaultCheckinSettings(),
 		Quota:               defaultQuotaSettings(),
 		Routing:             defaultRoutingSettings(),
+		VariantOverride:     "",
 	}
 }
 
@@ -152,6 +156,10 @@ func (g *gatewaySettings) applyDefaults() {
 	g.Quota.applyDefaults()
 	// And the routing block.
 	g.Routing.applyDefaults()
+	// Normalize variant override.
+	if g.VariantOverride != "" && g.VariantOverride != "cn" && g.VariantOverride != "ai" {
+		g.VariantOverride = ""
+	}
 }
 
 // applyDefaults fills the check-in block with sensible values when it was not

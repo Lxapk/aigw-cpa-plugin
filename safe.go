@@ -39,7 +39,7 @@ func safeGo(loopName string, fn func()) {
 func recoverLoop(loopName string) {
 	if r := recover(); r != nil {
 		fmt.Fprintf(os.Stderr,
-			"aigw-reverse-proxy: recovered panic in %s: %v\n%s\n",
+			"workbuddy: recovered panic in %s: %v\n%s\n",
 			loopName, r, debug.Stack())
 	}
 }
@@ -70,7 +70,7 @@ func guardRPC(method string, fn func() ([]byte, error)) (out []byte, err error) 
 				fmt.Sprintf("%s panicked: %v", method, r), 500)
 			err = nil
 			fmt.Fprintf(os.Stderr,
-				"aigw-reverse-proxy: recovered panic in %s: %v\n%s\n",
+				"workbuddy: recovered panic in %s: %v\n%s\n",
 				method, r, debug.Stack())
 		}
 	}()

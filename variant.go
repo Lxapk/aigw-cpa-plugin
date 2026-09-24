@@ -36,6 +36,13 @@ var allVariants = []wbVariant{variantCn, variantAi}
 // Mirrors has_ai_domain_suffix(): only a real ".workbuddy.ai" suffix counts, so
 // lookalike domains ("workbuddy.ai.evil") are not misclassified.
 func variantForDomain(domain string) wbVariant {
+	override := state.settings.get().VariantOverride
+	if override == "ai" {
+		return variantAi
+	}
+	if override == "cn" {
+		return variantCn
+	}
 	d := strings.ToLower(strings.TrimSpace(domain))
 	if d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai") {
 		return variantAi
