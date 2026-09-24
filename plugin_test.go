@@ -752,13 +752,14 @@ func resetState() {
 	stopCheckinScheduler()
 	stopQuotaScheduler()
 	state = &globalState{
-		settings:  newSettingsStore(),
-		pool:      newCredentialPool(),
-		log:       newCallLog(100),
-		checkin:   newCheckinState(),
-		quota:     newQuotaState(),
-		accounts:  newAccountStore(),
-		scheduler: newSchedulerState(),
+		settings:   newSettingsStore(),
+		pool:       newCredentialPool(),
+		log:        newCallLog(100),
+		checkin:    newCheckinState(),
+		quota:      newQuotaState(),
+		accounts:   newAccountStore(),
+		scheduler:  newSchedulerState(),
+		taskEngine: newTaskEngine(),
 	}
 	inflight = newInflightMap()
 	streamAccumulators.mu.Lock()

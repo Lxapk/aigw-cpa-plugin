@@ -78,6 +78,8 @@ type workBuddyAccount struct {
 	Reason        string    `json:"reason,omitempty"`
 	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
 	Usable        bool      `json:"usable"`
+	// DisabledByUser reports the operator's manual enable/disable toggle.
+	DisabledByUser bool `json:"disabled_by_user"`
 
 	// credentials is the parsed credential material, kept for internal callers
 	// (model catalogue, quota refresh). Unexported so it never reaches JSON.
@@ -362,6 +364,7 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 				a.Reason = lane.StatusMessage
 			}
 			a.CooldownUntil = lane.CooldownUntil
+			a.DisabledByUser = lane.DisabledByUser
 			break
 		}
 

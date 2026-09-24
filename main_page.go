@@ -187,7 +187,7 @@ func renderMainPage() string {
 		b.WriteString(`<div class="empty">还没有 WorkBuddy 账号。请到 CPA 的「认证」页登录。</div>`)
 	} else {
 		b.WriteString(`<table><thead><tr>`)
-		b.WriteString(`<th>账号</th><th>UID</th><th>版本</th><th class="num">积分</th><th>到期</th><th>状态</th></tr></thead><tbody>`)
+		b.WriteString(`<th>账号</th><th>UID</th><th>版本</th><th class="num">积分</th><th>到期</th><th>状态</th><th>操作</th></tr></thead><tbody>`)
 		for _, a := range accounts {
 			pillClass, statusText := "ok", "可用"
 			detail := ""
@@ -226,7 +226,17 @@ func renderMainPage() string {
 			if detail != "" {
 				b.WriteString(` <span class="muted small">` + html.EscapeString(detail) + `</span>`)
 			}
-			b.WriteString(`</td></tr>`)
+			b.WriteString(`</td>`)
+			// enable/disable toggle
+			uid := firstNonEmpty(a.UID, a.AuthIndex)
+			if a.DisabledByUser {
+				b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
+					`onclick="toggleAccount('` + html.EscapeString(uid) + `','enable')">启用</button></td>`)
+			} else {
+				b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
+					`onclick="toggleAccount('` + html.EscapeString(uid) + `','disable')">禁用</button></td>`)
+			}
+			b.WriteString(`</tr>`)
 		}
 		b.WriteString(`</tbody></table>`)
 	}
