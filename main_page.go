@@ -160,6 +160,7 @@ func renderMainPage() string {
 	tab("tab-checkin", "签到", false)
 	tab("tab-credits", "积分", false)
 	tab("tab-usage", "统计", false)
+	tab("tab-tasks", "任务", false)
 	tab("tab-settings", "设置", false)
 	b.WriteString(`</div>`)
 
@@ -377,6 +378,9 @@ func renderMainPage() string {
 		b.WriteString(`</tbody></table>`)
 	}
 	b.WriteString(`</div></div>`)
+
+	// ---------------- tab: tasks ----------------
+	b.WriteString(renderTaskPage())
 
 	// ---------------- tab: settings ----------------
 	b.WriteString(`<div id="tab-settings" class="panel">`)
