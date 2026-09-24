@@ -85,17 +85,38 @@ type credentialLane struct {
 // This is orthogonal to the host's own disabled flag — it persists across
 // restarts in the pool state and is checked by usable().
 func (p *credentialPool) disableAccount(uid string, disabled bool) {
+	p.disableAccountKeyed(uid, "", disabled)
+}
+
+// disableAccountKeyed marks a credential for manual enable/disable from the
+// panel, matching lanes by uid AND the CPA auth index.
+//
+// The two identifiers differ by code path: the panel keys accounts by the
+// provider-side uid (creds.UID), while the pool lane seen by interception is
+// keyed by the CPA auth index (metadata auth_id / AuthIndex). Matching only
+// one of them silently created an orphan disabled lane while the live lane
+// stayed enabled — the "账号禁用不了" report. Both are applied so the toggle
+// always lands on the lane that actually serves traffic.
+func (p *credentialPool) disableAccountKeyed(uid, authIndex string, disabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	matched := false
 	for _, lane := range p.lanes {
-		if lane.UID == uid {
+		if (uid != "" && lane.UID == uid) || (authIndex != "" && lane.UID == authIndex) {
 			lane.DisabledByUser = disabled
-			return
+			matched = true
 		}
 	}
-	p.lanes[laneKey(workBuddyProviderKey, uid)] = &credentialLane{
+	if matched {
+		return
+	}
+	key := firstNonEmpty(uid, authIndex)
+	if key == "" {
+		return
+	}
+	p.lanes[laneKey(workBuddyProviderKey, key)] = &credentialLane{
 		Provider:       workBuddyProviderKey,
-		UID:            uid,
+		UID:            key,
 		DisabledByUser: disabled,
 		Enabled:        true,
 	}
@@ -103,17 +124,30 @@ func (p *credentialPool) disableAccount(uid string, disabled bool) {
 
 // findAccount returns a lane by uid, or nil.
 func (p *credentialPool) findAccount(uid string) *credentialLane {
-	if uid == "" {
+	return p.findAccountKeyed(uid, "")
+}
+
+// findAccountKeyed returns the first lane matching uid or the CPA auth index,
+// or nil. See disableAccountKeyed for why both keys are consulted.
+func (p *credentialPool) findAccountKeyed(uid, authIndex string) *credentialLane {
+	if uid == "" && authIndex == "" {
 		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, lane := range p.lanes {
-		if lane.UID == uid {
+		if (uid != "" && lane.UID == uid) || (authIndex != "" && lane.UID == authIndex) {
 			return lane
 		}
 	}
 	return nil
+}
+
+// isAccountDisabled reports whether any pool lane matching uid/authIndex is
+// manually disabled by the operator (or permanently parked by the host).
+func (p *credentialPool) isAccountDisabled(uid, authIndex string) bool {
+	lane := p.findAccountKeyed(uid, authIndex)
+	return lane != nil && (lane.DisabledByUser || lane.Disabled)
 }
 
 //	!d.disabled && d.enabled && now >= d.untilMillis

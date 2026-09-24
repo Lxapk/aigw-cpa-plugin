@@ -234,10 +234,10 @@ func renderMainPage() string {
 			uid := firstNonEmpty(a.UID, a.AuthIndex)
 			if a.DisabledByUser {
 				b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
-					`onclick="toggleAccount('` + html.EscapeString(uid) + `','enable')">启用</button></td>`)
+					`onclick="toggleAccount('` + html.EscapeString(uid) + `','enable','` + html.EscapeString(a.AuthIndex) + `')">启用</button></td>`)
 			} else {
 				b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
-					`onclick="toggleAccount('` + html.EscapeString(uid) + `','disable')">禁用</button></td>`)
+					`onclick="toggleAccount('` + html.EscapeString(uid) + `','disable','` + html.EscapeString(a.AuthIndex) + `')">禁用</button></td>`)
 			}
 			b.WriteString(`</tr>`)
 		}
@@ -571,9 +571,10 @@ func handleAccountToggleRequest(req pluginapi.ManagementRequest) (managementResp
 		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
 	}
 	var body struct {
-		UID      string `json:"uid"`
-		Action   string `json:"action"`
-		Disabled bool   `json:"disabled"`
+		UID       string `json:"uid"`
+		AuthIndex string `json:"auth_index"`
+		Action    string `json:"action"`
+		Disabled  bool   `json:"disabled"`
 	}
 	if len(req.Body) > 0 {
 		if errUnmarshal := json.Unmarshal(req.Body, &body); errUnmarshal != nil {
@@ -584,7 +585,7 @@ func handleAccountToggleRequest(req pluginapi.ManagementRequest) (managementResp
 			}, true
 		}
 	}
-	if body.UID == "" {
+	if body.UID == "" && body.AuthIndex == "" {
 		return managementResponse{
 			StatusCode: http.StatusBadRequest,
 			Headers:    jsonResponseHeaders(),
@@ -593,15 +594,19 @@ func handleAccountToggleRequest(req pluginapi.ManagementRequest) (managementResp
 	}
 	switch body.Action {
 	case "disable":
-		state.pool.disableAccount(body.UID, body.Disabled)
+		// The panel only sends uid/auth_index/action — never "disabled" — so
+		// the disable branch must force-disable. Passing body.Disabled through
+		// would silently no-op (false default) and leave the account enabled:
+		// the "账号禁用没解开" report.
+		state.pool.disableAccountKeyed(body.UID, body.AuthIndex, true)
 	case "enable":
-		state.pool.disableAccount(body.UID, false)
+		state.pool.disableAccountKeyed(body.UID, body.AuthIndex, false)
 	case "toggle":
-		lane := state.pool.findAccount(body.UID)
+		lane := state.pool.findAccountKeyed(body.UID, body.AuthIndex)
 		if lane == nil {
-			state.pool.disableAccount(body.UID, true)
+			state.pool.disableAccountKeyed(body.UID, body.AuthIndex, true)
 		} else {
-			state.pool.disableAccount(body.UID, !lane.DisabledByUser)
+			state.pool.disableAccountKeyed(body.UID, body.AuthIndex, !lane.DisabledByUser)
 		}
 	default:
 		return managementResponse{

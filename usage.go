@@ -161,6 +161,7 @@ var state = &globalState{
 }
 
 func shutdownPlugin() {
+	stopTaskScheduler()
 	stopCheckinScheduler()
 	stopQuotaScheduler()
 }

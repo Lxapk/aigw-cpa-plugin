@@ -749,10 +749,14 @@ func TestParseRequestMeta(t *testing.T) {
 
 // resetState reinstalls pristine singleton state between tests.
 func resetState() {
+	stopTaskScheduler()
 	stopCheckinScheduler()
 	stopQuotaScheduler()
 	state = &globalState{
-		settings:   newSettingsStore(),
+		// Hermetic: no on-disk state file, so variant overrides written by one
+		// test cannot leak into the next. The production initializer above
+		// still uses newSettingsStore() with real persistence.
+		settings:   newSettingsStoreWithPersist(""),
 		pool:       newCredentialPool(),
 		log:        newCallLog(100),
 		checkin:    newCheckinState(),

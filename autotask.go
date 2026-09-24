@@ -160,12 +160,18 @@ func (e *taskEngine) enqueue(req taskRequest) {
 // safe to call from a loop goroutine.
 func (e *taskEngine) tick(ctx context.Context) {
 	e.mu.Lock()
-	// Start as many as concurrency allows.
-	for e.running < e.concurrency && len(e.queue) > 0 {
-		req := e.queue[0]
-		e.queue = e.queue[1:]
+	// Start as many as concurrency allows. An in-flight account is deferred to
+	// the next tick rather than re-queued in this same loop, otherwise a queue
+	// full of running accounts spins this loop forever.
+	pending := append([]taskRequest(nil), e.queue...)
+	e.queue = e.queue[:0]
+	for _, req := range pending {
+		if e.running >= e.concurrency {
+			e.queue = append(e.queue, req)
+			continue
+		}
 		if _, inFlight := e.inFlight[req.UID]; inFlight {
-			// Already running: re-queue at the end.
+			// Defer to next tick.
 			e.queue = append(e.queue, req)
 			continue
 		}
@@ -196,11 +202,50 @@ func (e *taskEngine) execute(ctx context.Context, req taskRequest) {
 }
 
 func (e *taskEngine) runCheckin(_ context.Context, uid string) {
-	e.record(uid, taskKindCheckin, true, "签到成功")
+	account, ok := e.resolveAccount(uid)
+	if !ok {
+		e.record(uid, taskKindCheckin, false, "账号不存在或已禁用")
+		return
+	}
+	res := checkinOne(account, state.settings.get().Checkin)
+	msg := firstNonEmpty(res.Message, res.Error, "签到完成")
+	e.record(uid, taskKindCheckin, res.Success && res.Error == "", msg)
 }
 
 func (e *taskEngine) runQuota(_ context.Context, uid string) {
-	e.record(uid, taskKindQuota, true, "积分已刷新")
+	account, ok := e.resolveAccount(uid)
+	if !ok {
+		e.record(uid, taskKindQuota, false, "账号不存在或已禁用")
+		return
+	}
+	res := fetchQuotaOne(account)
+	msg := firstNonEmpty(res.Message, res.Error, "积分已刷新")
+	e.record(uid, taskKindQuota, res.Error == "", msg)
+}
+
+// resolveAccount maps a task uid onto a real check-in credential, refusing
+// accounts the operator has disabled. The task engine never goes through
+// pool.pick, so the disabled filter has to be applied explicitly here.
+func (e *taskEngine) resolveAccount(uid string) (checkinAccount, bool) {
+	accounts, errCollect := collectCheckinAccounts()
+	if errCollect != nil {
+		return checkinAccount{}, false
+	}
+	for _, account := range accounts {
+		if account.AuthID != uid && (account.Creds == nil || account.Creds.UID != uid) {
+			continue
+		}
+		authIndex := account.AuthID
+		credUID := ""
+		if account.Creds != nil {
+			credUID = account.Creds.UID
+		}
+		if state.pool.isAccountDisabled(credUID, authIndex) {
+			return checkinAccount{}, false
+		}
+		return account, true
+	}
+	return checkinAccount{}, false
 }
 
 func (e *taskEngine) record(uid string, kind taskKind, ok bool, msg string) {
@@ -297,9 +342,122 @@ func (e *taskEngine) initFromAccounts(accounts []workBuddyAccount) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, a := range accounts {
-		at := e.ensureAccount(a.UID)
+		key := firstNonEmpty(a.UID, a.AuthIndex)
+		if key == "" {
+			continue
+		}
+		at := e.ensureAccount(key)
 		if a.Label != "" {
 			at.Label = a.Label
 		}
+		at.Enabled = !a.Disabled && !a.DisabledByUser
+	}
+}
+
+// ---- scheduler ----------------------------------------------------------
+
+// startTaskScheduler launches the background task loop exactly once.
+//
+// It mirrors the check-in and quota schedulers: a one-minute tick scans for
+// due per-account tasks and feeds the existing queue, which tick() drains
+// under the concurrency cap. The loop is idempotent across repeated
+// plugin.register calls.
+func startTaskScheduler() {
+	e := state.taskEngine
+	e.mu.Lock()
+	if e.started {
+		e.mu.Unlock()
+		return
+	}
+	e.started = true
+	e.mu.Unlock()
+
+	safeGo("task-loop", taskLoop)
+}
+
+// taskLoop periodically enqueues due tasks and drains the queue.
+func taskLoop() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	// One immediate pass so tasks become visible without waiting a minute.
+	taskTick()
+
+	for {
+		select {
+		case <-state.taskEngine.stopCh:
+			return
+		case <-ticker.C:
+			guardLoop("task-loop", taskTick)
+		}
+	}
+}
+
+// taskTick scans accounts for due tasks and lets the engine run them.
+func taskTick() {
+	state.taskEngine.scanDue(time.Now())
+	state.taskEngine.tick(context.Background())
+}
+
+// stopTaskScheduler ends the background task loop.
+func stopTaskScheduler() {
+	e := state.taskEngine
+	e.mu.Lock()
+	started := e.started
+	e.started = false
+	e.mu.Unlock()
+	if !started {
+		return
+	}
+	select {
+	case e.stopCh <- struct{}{}:
+	default:
+	}
+}
+
+// scanDue enqueues every enabled account whose scheduled tasks are due.
+//
+// Disabled accounts (by the host or by the panel toggle) are skipped, and an
+// account already queued or running is not enqueued again.
+func (e *taskEngine) scanDue(now time.Time) {
+	accounts, errCollect := collectCheckinAccounts()
+	if errCollect != nil {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, account := range accounts {
+		credUID := ""
+		if account.Creds != nil {
+			credUID = account.Creds.UID
+		}
+		if state.pool.isAccountDisabled(credUID, account.AuthID) {
+			continue
+		}
+		key := firstNonEmpty(credUID, account.AuthID)
+		if key == "" {
+			continue
+		}
+		at := e.ensureAccount(key)
+		if account.Label != "" {
+			at.Label = account.Label
+		}
+		if !at.Enabled {
+			continue
+		}
+		if e.inQueue(key) || e.inFlightCount(key) > 0 {
+			continue
+		}
+		var due []taskKind
+		for _, spec := range defaultTasks {
+			if at.due(spec, now) {
+				due = append(due, spec.Kind)
+			}
+		}
+		if len(due) == 0 {
+			continue
+		}
+		e.queue = append(e.queue, taskRequest{UID: key, Tasks: due})
 	}
 }

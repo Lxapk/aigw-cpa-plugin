@@ -251,12 +251,12 @@ func mainPageScript() string {
   };
 
   // ---- account toggle --------------------------------------------------
-  window.toggleAccount = function (uid, action) {
+  window.toggleAccount = function (uid, action, authIndex) {
     msgSet('runMsg', '操作中…', 'muted');
     call(BASE + '/account/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uid: uid, action: action || 'toggle' })
+      body: JSON.stringify({ uid: uid, auth_index: authIndex || '', action: action || 'toggle' })
     }).then(function () {
       msgSet('runMsg', '已完成', 'ok');
       setTimeout(function () { location.reload(); }, 500);

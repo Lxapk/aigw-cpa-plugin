@@ -333,23 +333,6 @@ func statusPage() string {
 	}
 	b.WriteString("</div>")
 
-	b.WriteString("<h2>网关设置</h2><table><tr><th>项</th><th>值</th></tr>")
-	writeRow := func(k string, v any) {
-		b.WriteString("<tr><td><code>" + html.EscapeString(k) + "</code></td><td>" + html.EscapeString(fmt.Sprint(v)) + "</td></tr>")
-	}
-	writeRow("api_key", settings.marshalForLog()["api_key"])
-	writeRow("allow_no_key", settings.AllowNoKey)
-	writeRow("expose_lan", settings.ExposeLAN)
-	writeRow("default_provider", settings.DefaultProvider)
-	writeRow("max_rotate", settings.MaxRotate)
-	writeRow("error_threshold", settings.ErrorThreshold)
-	writeRow("soft_cooldown_millis", settings.SoftCooldownMillis)
-	writeRow("quota_cooldown_millis", settings.QuotaCooldownMillis)
-	writeRow("error_cooldown_millis", settings.ErrorCooldownMillis)
-	writeRow("refresh_skew_seconds", settings.RefreshSkewSeconds)
-	writeRow("log_retention_days", settings.LogRetentionDays)
-	b.WriteString("</table>")
-
 	b.WriteString("<h2>账号池</h2>")
 	if len(lanes) == 0 {
 		b.WriteString("<p class=\"muted\">尚无账号记录。首次转发成功后 CPA 会在这里登记所选凭据。</p>")

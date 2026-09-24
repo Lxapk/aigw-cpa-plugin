@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "workbuddy"
-	pluginVersion = "0.13.6"
+	pluginVersion = "0.13.7"
 	pluginAuthor  = "TaiXu (ported from AI 聚合网关 0.1.18 / dev.aigw.app)"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -124,6 +124,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		if state.settings.get().Quota.Enabled {
 			startQuotaScheduler()
 		}
+		startTaskScheduler()
 		return okEnvelope(buildRegistration())
 
 	case pluginabi.MethodPluginQuiesce:

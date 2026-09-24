@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -190,13 +192,27 @@ type settingsStore struct {
 	mu  sync.RWMutex
 	val gatewaySettings
 
+	// persistPath is the on-disk mirror for panel-only overrides (variant
+	// override). CPA re-sends config_yaml on register/reconfigure, and the YAML
+	// does not carry variant_override back, so without this file the panel
+	// choice would silently reset to "auto" on every hot-reload. Empty
+	// disables persistence (used by tests that must stay hermetic).
+	persistPath string
+
 	// registrations counts plugin.register / plugin.reconfigure calls so the
 	// management page can show that hot-reload is wired up.
 	registrations atomic.Int64
 }
 
+// newSettingsStore returns a store backed by the default per-user state file.
 func newSettingsStore() *settingsStore {
-	s := &settingsStore{}
+	return newSettingsStoreWithPersist(filepath.Join(pluginStateDir(), "state.json"))
+}
+
+// newSettingsStoreWithPersist returns a store writing overrides to path.
+// Pass "" to disable persistence entirely (hermetic tests).
+func newSettingsStoreWithPersist(path string) *settingsStore {
+	s := &settingsStore{persistPath: path}
 	s.val = defaultGatewaySettings()
 	return s
 }
@@ -228,14 +244,55 @@ func (s *settingsStore) setQuota(cfg quotaSettings) {
 	s.val.Quota = cfg
 }
 
-// setVariantOverride persists the variant force-setting.
+// setVariantOverride persists the variant force-setting. The override is
+// stored both in memory and in the per-user state file so that a later
+// plugin.reconfigure (which carries no variant_override in its YAML) cannot
+// silently reset the panel choice back to "auto".
 func (s *settingsStore) setVariantOverride(v string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if v != "" && v != "cn" && v != "ai" {
 		v = ""
 	}
 	s.val.VariantOverride = v
+	s.mu.Unlock()
+	s.saveVariantOverrideLocked(v)
+}
+
+// saveVariantOverrideLocked mirrors the current override to disk (best effort;
+// a read-only data dir must not break the panel).
+func (s *settingsStore) saveVariantOverrideLocked(v string) {
+	if s.persistPath == "" {
+		return
+	}
+	raw, errMarshal := json.Marshal(struct {
+		VariantOverride string `json:"variant_override"`
+	}{VariantOverride: v})
+	if errMarshal != nil {
+		return
+	}
+	_ = atomicWriteFile(s.persistPath, raw)
+}
+
+// restoreVariantOverride reads a previously persisted override (from a panel
+// action in an earlier plugin instance or before the last reconfigure).
+func (s *settingsStore) restoreVariantOverride() string {
+	if s.persistPath == "" {
+		return ""
+	}
+	raw, errRead := os.ReadFile(s.persistPath)
+	if errRead != nil {
+		return ""
+	}
+	var disk struct {
+		VariantOverride string `json:"variant_override"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &disk); errUnmarshal != nil {
+		return ""
+	}
+	if disk.VariantOverride != "" && disk.VariantOverride != "cn" && disk.VariantOverride != "ai" {
+		return ""
+	}
+	return disk.VariantOverride
 }
 
 // setRouting replaces only the routing block, leaving gateway settings intact.
@@ -279,6 +336,16 @@ func (s *settingsStore) decodeLifecycleConfig(raw []byte) error {
 		}
 	}
 	s.set(cfg)
+	// The host YAML does not round-trip panel-only fields. If the config does
+	// not explicitly set variant_override, restore the persisted panel choice
+	// so a reconfigure does not flip a manually forced variant back to "auto".
+	if !yamlHasKey(raw, "variant_override") {
+		if restored := s.restoreVariantOverride(); restored != "" {
+			s.mu.Lock()
+			s.val.VariantOverride = restored
+			s.mu.Unlock()
+		}
+	}
 	s.registrations.Add(1)
 	return nil
 }

@@ -135,6 +135,12 @@ func collectCheckinAccounts() ([]checkinAccount, error) {
 		if id == "" {
 			id = creds.authID()
 		}
+		// Skip accounts the operator disabled from the panel, or the host has
+		// parked. The task engine and the scheduled passes share this list, so
+		// filtering here keeps every caller consistent.
+		if state.pool.isAccountDisabled(creds.UID, id) {
+			continue
+		}
 		out = append(out, checkinAccount{
 			AuthID: id,
 			Label:  firstNonEmpty(entry.Label, entry.Name, creds.label()),
