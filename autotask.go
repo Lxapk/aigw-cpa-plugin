@@ -112,14 +112,6 @@ type taskRequest struct {
 }
 
 // taskResult is the outcome of one taskRequest.
-type taskResult struct {
-	UID     string            `json:"uid"`
-	Results map[string]string `json:"results"`
-	OK      bool              `json:"ok"`
-	Error   string            `json:"error,omitempty"`
-	Started time.Time         `json:"started"`
-	Elapsed time.Duration     `json:"elapsed"`
-}
 
 // taskEngine manages the concurrent task queue.
 type taskEngine struct {
