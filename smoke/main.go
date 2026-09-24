@@ -126,8 +126,8 @@ func main() {
 		Capabilities map[string]any `json:"capabilities"`
 	}
 	mustUnmarshal(regResp.Result, &reg)
-	if len(reg.Metadata.ConfigFields) != 22 {
-		die("expected 22 config fields, got %d", len(reg.Metadata.ConfigFields))
+	if len(reg.Metadata.ConfigFields) != 18 {
+		die("expected 18 config fields, got %d", len(reg.Metadata.ConfigFields))
 	}
 	ok("registered %s v%s (schema=%d, config_fields=%d)", reg.Metadata.Name, reg.Metadata.Version, reg.SchemaVersion, len(reg.Metadata.ConfigFields))
 	for _, cap := range []string{"frontend_auth_provider", "request_interceptor", "response_interceptor", "response_stream_interceptor", "usage_plugin", "management_api"} {
@@ -689,8 +689,8 @@ func main() {
 		} `json:"routing"`
 	}
 	mustUnmarshal(routingEnv.Body, &routingDoc)
-	if len(routingDoc.Routing.Options) != 4 {
-		die("expected 4 strategy options, got %d", len(routingDoc.Routing.Options))
+	if len(routingDoc.Routing.Options) != 5 {
+		die("expected 5 strategy options, got %d", len(routingDoc.Routing.Options))
 	}
 	ok("routing/status -> strategy=%s options=%d", routingDoc.Routing.Strategy, len(routingDoc.Routing.Options))
 
