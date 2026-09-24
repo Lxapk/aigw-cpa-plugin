@@ -367,6 +367,12 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 				"scheduler": schedulerSnapshot(),
 			}),
 		}, true
+
+	case "/variant":
+		return handleVariantRequest(req)
+
+	case "/account/toggle":
+		return handleAccountToggleRequest(req)
 	}
 
 	if method == http.MethodPost {
@@ -430,4 +436,87 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 	}
 
 	return managementResponse{}, false
+}
+
+// ---- variant endpoint --------------------------------------------------
+
+func handleVariantRequest(req pluginapi.ManagementRequest) (managementResponse, bool) {
+	if method := strings.ToUpper(strings.TrimSpace(req.Method)); method != http.MethodPost {
+		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
+	}
+	var body struct {
+		Variant string `json:"variant"`
+	}
+	if len(req.Body) > 0 {
+		if errUnmarshal := json.Unmarshal(req.Body, &body); errUnmarshal != nil {
+			return managementResponse{
+				StatusCode: http.StatusBadRequest,
+				Headers:    jsonResponseHeaders(),
+				Body:       mustJSON(map[string]any{"error": errUnmarshal.Error()}),
+			}, true
+		}
+	}
+	v := body.Variant
+	if v != "" && v != "cn" && v != "ai" {
+		v = ""
+	}
+	state.settings.setVariantOverride(v)
+	return managementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    jsonResponseHeaders(),
+		Body:       mustJSON(map[string]any{"ok": true, "variant": v}),
+	}, true
+}
+
+// ---- account toggle endpoint -------------------------------------------
+
+func handleAccountToggleRequest(req pluginapi.ManagementRequest) (managementResponse, bool) {
+	if method := strings.ToUpper(strings.TrimSpace(req.Method)); method != http.MethodPost {
+		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
+	}
+	var body struct {
+		UID      string `json:"uid"`
+		Action   string `json:"action"`
+		Disabled bool   `json:"disabled"`
+	}
+	if len(req.Body) > 0 {
+		if errUnmarshal := json.Unmarshal(req.Body, &body); errUnmarshal != nil {
+			return managementResponse{
+				StatusCode: http.StatusBadRequest,
+				Headers:    jsonResponseHeaders(),
+				Body:       mustJSON(map[string]any{"error": errUnmarshal.Error()}),
+			}, true
+		}
+	}
+	if body.UID == "" {
+		return managementResponse{
+			StatusCode: http.StatusBadRequest,
+			Headers:    jsonResponseHeaders(),
+			Body:       mustJSON(map[string]any{"error": "缺少 uid"}),
+		}, true
+	}
+	switch body.Action {
+	case "disable":
+		state.pool.disableAccount(body.UID, body.Disabled)
+	case "enable":
+		state.pool.disableAccount(body.UID, false)
+	case "toggle":
+		lane := state.pool.findAccount(body.UID)
+		if lane == nil {
+			state.pool.disableAccount(body.UID, true)
+		} else {
+			state.pool.disableAccount(body.UID, !lane.DisabledByUser)
+		}
+	default:
+		return managementResponse{
+			StatusCode: http.StatusBadRequest,
+			Headers:    jsonResponseHeaders(),
+			Body:       mustJSON(map[string]any{"error": "未知操作"}),
+		}, true
+	}
+	return managementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    jsonResponseHeaders(),
+		Body:       mustJSON(map[string]any{"ok": true}),
+	}, true
 }

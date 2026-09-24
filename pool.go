@@ -50,6 +50,8 @@ type credentialLane struct {
 	Label string `json:"label"`
 	// Disabled mirrors V1.n.e.
 	Disabled bool `json:"disabled"`
+	// DisabledByUser tracks manual toggles from the panel.
+	DisabledByUser bool `json:"disabled_by_user"`
 	// Enabled mirrors W1.d.f (defaults to true in the app).
 	Enabled bool `json:"enabled"`
 	// StatusMessage mirrors V1.n.g / W1.d.f3831g.
@@ -78,11 +80,47 @@ type credentialLane struct {
 	Failures  int64 `json:"failures"`
 }
 
-// usable ports the guard in A0/s.java:596:
+// disableAccount marks a credential for manual enable/disable from the panel.
 //
+// This is orthogonal to the host's own disabled flag — it persists across
+// restarts in the pool state and is checked by usable().
+func (p *credentialPool) disableAccount(uid string, disabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, lane := range p.lanes {
+		if lane.UID == uid {
+			lane.DisabledByUser = disabled
+			return
+		}
+	}
+	p.lanes[laneKey(workBuddyProviderKey, uid)] = &credentialLane{
+		Provider:       workBuddyProviderKey,
+		UID:            uid,
+		DisabledByUser: disabled,
+		Enabled:        true,
+	}
+}
+
+// findAccount returns a lane by uid, or nil.
+func (p *credentialPool) findAccount(uid string) *credentialLane {
+	if uid == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, lane := range p.lanes {
+		if lane.UID == uid {
+			return lane
+		}
+	}
+	return nil
+}
+
 //	!d.disabled && d.enabled && now >= d.untilMillis
+//
+// and also checks the operator's manual toggle.
 func (c *credentialLane) usable(now time.Time) bool {
-	if c.Disabled || !c.Enabled {
+	if c.Disabled || c.DisabledByUser || !c.Enabled {
 		return false
 	}
 	return !now.Before(c.CooldownUntil)

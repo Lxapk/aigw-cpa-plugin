@@ -234,6 +234,37 @@ func mainPageScript() string {
     });
   };
 
+  // ---- variant override -----------------------------------------------
+  window.setVariant = function (v) {
+    var msg = document.getElementById('variantMsg');
+    if (msg) { msg.textContent = '保存中…'; msg.className = 'small muted'; }
+    call(BASE + '/variant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ variant: v })
+    }).then(function () {
+      if (msg) { msg.textContent = '已切换为 ' + (v || '自动') + '，刷新列表后生效'; msg.className = 'small ok'; }
+      setTimeout(function () { location.reload(); }, 700);
+    }).catch(function (e) {
+      if (msg) { msg.textContent = '设置失败：' + e.message; msg.className = 'small bad'; }
+    });
+  };
+
+  // ---- account toggle --------------------------------------------------
+  window.toggleAccount = function (uid, action) {
+    msgSet('runMsg', '操作中…', 'muted');
+    call(BASE + '/account/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: uid, action: action || 'toggle' })
+    }).then(function () {
+      msgSet('runMsg', '已完成', 'ok');
+      setTimeout(function () { location.reload(); }, 500);
+    }).catch(function (e) {
+      msgSet('runMsg', '操作失败：' + e.message, 'bad');
+    });
+  };
+
   document.addEventListener('DOMContentLoaded', function () {
     refreshKeyState();
     restoreTab();

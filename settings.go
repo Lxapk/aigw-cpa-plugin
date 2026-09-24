@@ -226,6 +226,16 @@ func (s *settingsStore) setQuota(cfg quotaSettings) {
 	s.val.Quota = cfg
 }
 
+// setVariantOverride persists the variant force-setting.
+func (s *settingsStore) setVariantOverride(v string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v != "" && v != "cn" && v != "ai" {
+		v = ""
+	}
+	s.val.VariantOverride = v
+}
+
 // setRouting replaces only the routing block, leaving gateway settings intact.
 func (s *settingsStore) setRouting(cfg routingSettings) {
 	s.mu.Lock()

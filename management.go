@@ -104,6 +104,16 @@ func managementRegistration() managementRegistrationResponse {
 				Description: "Update the automatic check-in schedule.",
 			},
 			{
+				Method:      http.MethodPost,
+				Path:        "/workbuddy/variant",
+				Description: "Set variant override (cn / ai / empty=auto).",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/workbuddy/account/toggle",
+				Description: "Toggle account enable/disable.",
+			},
+			{
 				Method:      http.MethodGet,
 				Path:        "/workbuddy/quota",
 				Description: "WorkBuddy quota page.",
