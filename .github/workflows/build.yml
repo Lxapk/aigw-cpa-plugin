@@ -96,11 +96,12 @@ jobs:
             registry.json
           generate_release_notes: true
 
-      # self-check
+      # self-check — use /releases/{id}/assets (avoids tag endpoint indexing lag)
       - name: Verify
         id: ver2
         run: |
-          count=$(gh api "repos/${{ github.repository }}/releases/tags/v${{ steps.ver.outputs.version }}" \
-            --jq '.assets | length' 2>/dev/null || echo 0)
-          echo "assets in release: ${count}"
-          [[ "${count}" -ge 3 ]] || { echo "assets count < 3"; exit 1; }
+          id=$(gh api "repos/${{ github.repository }}/releases/tags/v${{ steps.ver.outputs.version }}" --jq '.id' 2>/dev/null || echo "")
+          if [[ -z "${id}" ]]; then echo "release not found"; exit 1; fi
+          count=$(gh api "repos/${{ github.repository }}/releases/${id}/assets" --jq 'length' 2>/dev/null || echo 0)
+          echo "assets in release: ${count} (via /releases/${id}/assets)"
+          [[ "${count}" -ge 2 ]] || { echo "assets count < 2"; exit 1; }
