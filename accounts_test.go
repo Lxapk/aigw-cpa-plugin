@@ -302,7 +302,6 @@ func TestSinglePageContainsEverything(t *testing.T) {
 		"自动签到",      // check-in schedule
 		"自动刷新积分",    // quota schedule
 		"最近调用",      // usage
-		"网关设置",      // gateway config
 		"签到 + 刷新积分", // one-click action
 		"Acct One",  // the account is rendered server-side
 	} {

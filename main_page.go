@@ -13,6 +13,9 @@ import (
 
 // renderTaskPage builds the task centre tab content.
 func renderTaskPage() string {
+	// Populate the task engine with the current account list first, otherwise
+	// a freshly started plugin shows an empty task table.
+	state.taskEngine.initFromAccounts(listWorkBuddyAccounts())
 	status := taskStatusJSON()
 	accounts, _ := status["accounts"].([]map[string]any)
 	running, _ := status["running"].(int)
@@ -402,31 +405,19 @@ func renderMainPage() string {
 	b.WriteString(`<div class="note">密钥仅保存在本机浏览器（localStorage），不会上传到插件或服务器。</div>`)
 	b.WriteString(`</div>`)
 
-	b.WriteString(`<div class="card"><h2>版本切换 <span class="hint">国内版与国际版</span></h2>
-<div class="seg" id="variantSeg">
-<button type="button" class="active" onclick="setVariant('auto')">自动</button>
-<button type="button" onclick="setVariant('cn')">国内版</button>
-<button type="button" onclick="setVariant('ai')">国际版</button>
-</div>
-<div class="note">修改后保存设置生效。</div>
-<div class="muted small" id="variantMsg"></div>
-</div>
-
-<div class="card"><h2>网关设置</h2><table>`)
-	row := func(k string, v any) {
-		b.WriteString(`<tr><td><code>` + html.EscapeString(k) + `</code></td><td>` +
-			html.EscapeString(fmt.Sprint(v)) + `</td></tr>`)
+	curVariant := state.settings.get().VariantOverride
+	b.WriteString(`<div class="card"><h2>版本切换 <span class="hint">国内版与国际版</span></h2>`)
+	b.WriteString(`<div class="seg" id="variantSeg">`)
+	for _, opt := range []struct{ v, label string }{{"auto", "自动"}, {"cn", "国内版"}, {"ai", "国际版"}} {
+		cls := ""
+		if (opt.v == "auto" && curVariant == "") || opt.v == curVariant {
+			cls = ` class="active"`
+		}
+		b.WriteString(`<button type="button"` + cls + ` onclick="setVariant('` + opt.v + `')">` + opt.label + `</button>`)
 	}
-	row("default_provider", settings.DefaultProvider)
-	row("default_model", settings.DefaultModel)
-	row("enforce_frontend_key", settings.EnforceFrontendKey)
-	row("allow_no_key", settings.AllowNoKey)
-	row("api_key", settings.marshalForLog()["api_key"])
-	row("max_rotate", settings.MaxRotate)
-	row("error_threshold", settings.ErrorThreshold)
-	row("端口 port", settings.Port)
-	b.WriteString(`</table><div class="note">客户端鉴权由 CPA 的 <code>api-keys</code> 负责；` +
-		`本插件默认不重复校验，避免覆盖你已有的 CPA 密钥。</div></div>`)
+	b.WriteString(`</div>`)
+	b.WriteString(`<div class="note">选择后立即保存。</div>`)
+	b.WriteString(`<div class="muted small" id="variantMsg"></div>`)
 	b.WriteString(`</div>`)
 
 	b.WriteString(`</div>` + mainPageScript() + `</body></html>`)
