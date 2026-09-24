@@ -11,6 +11,97 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+// renderTaskPage builds the task centre tab content.
+func renderTaskPage() string {
+	status := taskStatusJSON()
+	accounts, _ := status["accounts"].([]map[string]any)
+	running, _ := status["running"].(int)
+	queued, _ := status["queued"].(int)
+
+	var b strings.Builder
+	b.WriteString(`<div id="tab-tasks" class="panel">`)
+	b.WriteString(`<div class="card"><h2>任务列表</h2><div class="grid stats">`)
+	stat := func(k string, v any) {
+		b.WriteString(`<div class="stat"><div class="v">` + fmt.Sprint(v) + `</div><div class="k">` + k + `</div></div>`)
+	}
+	stat("账号数", len(accounts))
+	stat("正在运行", running)
+	stat("排队中", queued)
+	b.WriteString(`</div></div>`)
+
+	b.WriteString(`<div class="card"><div class="row">`)
+	b.WriteString(`<button type="button" onclick="runAllTasks()">全部执行</button>`)
+	b.WriteString(`<span class="muted small" id="taskMsg"></span>`)
+	b.WriteString(`</div></div>`)
+
+	b.WriteString(`<div class="card"><h2>账号任务状态</h2>`)
+	if len(accounts) == 0 {
+		b.WriteString(`<div class="empty">还没有账号。</div>`)
+	} else {
+		b.WriteString(`<table><thead><tr><th>账号</th><th>启用</th><th>任务</th><th>上次</th><th>结果</th></tr></thead><tbody>`)
+		for _, acct := range accounts {
+			uid, _ := acct["uid"].(string)
+			label, _ := acct["label"].(string)
+			enabled, _ := acct["enabled"].(bool)
+			queuedFlag, _ := acct["queued"].(bool)
+			inflight, _ := acct["inflight"].(int)
+			enableCls := "ok"
+			enableText := "启用"
+			if !enabled {
+				enableCls = "muted"
+				enableText = "禁用"
+			}
+			b.WriteString(`<tr><td><strong>` + html.EscapeString(label) + `</strong></td>`)
+			btnCls := "pill " + enableCls
+			action := "enable"
+			if !enabled {
+				action = "disable"
+			}
+			b.WriteString(`<td><span class="` + btnCls + `" style="cursor:pointer" ` +
+				`onclick="toggleAccountTask('` + html.EscapeString(uid) + `','` + action + `')">` +
+				enableText + `</span></td>`)
+			if queuedFlag || inflight > 0 {
+				b.WriteString(`<td colspan="3"><span class="pill warn">` + map[bool]string{true: "排队中", false: "运行中"}[queuedFlag] + `</span></td>`)
+				b.WriteString(`</tr>`)
+				continue
+			}
+			b.WriteString(`<td>`)
+			tasks, _ := acct["tasks"].([]map[string]any)
+			for _, t := range tasks[:min(len(tasks), 1)] {
+				label, _ := t["label"].(string)
+				b.WriteString(html.EscapeString(label))
+			}
+			b.WriteString(`</td><td class="mono muted">`)
+			for _, t := range tasks[:min(len(tasks), 1)] {
+				lr, _ := t["last_run"].(string)
+				if lr != "" && len(lr) > 16 {
+					b.WriteString(html.EscapeString(lr[11:16]))
+				} else {
+					b.WriteString("—")
+				}
+			}
+			b.WriteString(`</td><td>`)
+			for _, t := range tasks[:min(len(tasks), 1)] {
+				lr, _ := t["last_result"].(string)
+				lok, _ := t["last_ok"].(bool)
+				cls := map[bool]string{true: "ok", false: "bad"}[lok]
+				b.WriteString(`<span class="pill ` + cls + `">` + html.EscapeString(firstNonEmpty(lr, "—")) + `</span>`)
+			}
+			b.WriteString(`</td></tr>`)
+		}
+		b.WriteString(`</tbody></table>`)
+	}
+	b.WriteString(`</div></div>`)
+	return b.String()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // renderMainPage builds the plugin's single management page.
 //
 // Everything the operator needs lives here behind a tab bar — accounts,
