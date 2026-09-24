@@ -15,7 +15,7 @@
           {
             "goos": "linux",
             "goarch": "amd64",
-            "url": "https://github.com/Lxapk/workbuddy-cpa-plugin/releases/download/v0.13.0/aigw-reverse-proxy_0.13.0_linux_amd64.zip",
+            "url": "https://github.com/Lxapk/workbuddy-cpa-plugin/releases/download/v0.13.0/workbuddy_0.13.0_linux_amd64.zip",
             "sha256": "e36bac8a9dc141ec15be6a655dd36ac1a24105aade84244bcdaae111ebb139bd"
           }
         ]
