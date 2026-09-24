@@ -6,7 +6,7 @@
       "name": "WorkBuddy",
       "description": "把 WorkBuddy 账号反代为 CPA 的 OpenAI 兼容接口：账号轮换、模型输出、签到与积分管理。",
       "author": "BlackHawk",
-      "version": "0.13.1",
+      "version": "0.13.3",
       "repository": "https://github.com/Lxapk/workbuddy-cpa-plugin",
       "license": "MIT",
       "install": {
@@ -15,8 +15,8 @@
           {
             "goos": "linux",
             "goarch": "amd64",
-            "url": "https://github.com/Lxapk/workbuddy-cpa-plugin/releases/download/v0.13.1/workbuddy_0.13.1_linux_amd64.zip",
-            "sha256": "8ba032c122e9775d656be80f231996bcaa89a28c19214b2565d59bc8d824d35e"
+            "url": "https://github.com/Lxapk/workbuddy-cpa-plugin/releases/download/v0.13.3/workbuddy_0.13.3_linux_amd64.zip",
+            "sha256": "b54cdfd12d3c05cdef246c7c831213821700c3ed12a755b3b116bee1440fc78d"
           }
         ]
       }
