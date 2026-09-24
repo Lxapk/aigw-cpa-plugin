@@ -18,7 +18,7 @@ permissions:
   contents: write
 
 env:
-  PLUGIN_ID: aigw-reverse-proxy
+  PLUGIN_ID: workbuddy
   PLUGIN_NAME: "WorkBuddy"
 
 jobs:
@@ -43,16 +43,16 @@ jobs:
         env: {CGO_ENABLED: "1", CC: gcc, GOOS: linux, GOARCH: amd64}
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -trimpath -o dist/aigw-reverse-proxy.so .
-          readelf -h dist/aigw-reverse-proxy.so | grep Machine
-          nm -D --defined-only dist/aigw-reverse-proxy.so | grep cliproxy_plugin_init
+          go build -buildmode=c-shared -trimpath -o dist/workbuddy.so .
+          readelf -h dist/workbuddy.so | grep Machine
+          nm -D --defined-only dist/workbuddy.so | grep cliproxy_plugin_init
           go build -o dist/smoke ./smoke
-          ./dist/smoke dist/aigw-reverse-proxy.so
+          ./dist/smoke dist/workbuddy.so
 
       - uses: actions/upload-artifact@v4
         with:
-          name: aigw-reverse-proxy-linux-amd64
-          path: dist/aigw-reverse-proxy.so
+          name: workbuddy-linux-amd64
+          path: dist/workbuddy.so
 
   package:
     needs: [build]
@@ -75,7 +75,7 @@ jobs:
           python3 scripts/build_release.py \
             --id "${PLUGIN_ID}" \
             --version "${{ steps.ver.outputs.version }}" \
-            --amd64 dist/aigw-reverse-proxy-linux-amd64/aigw-reverse-proxy.so \
+            --amd64 dist/workbuddy-linux-amd64/workbuddy.so \
             --out release
           python3 scripts/build_direct_registry.py \
             --id "${PLUGIN_ID}" --name "${PLUGIN_NAME}" \
