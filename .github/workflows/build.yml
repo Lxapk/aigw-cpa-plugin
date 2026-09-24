@@ -18,7 +18,7 @@ permissions:
   contents: write
 
 env:
-  PLUGIN_ID: aigw-reverse-proxy
+  PLUGIN_ID: workbuddy
   PLUGIN_NAME: "WorkBuddy"
 
 jobs:
