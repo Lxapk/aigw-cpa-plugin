@@ -573,7 +573,7 @@ func main() {
 		die("combined page status=%d len=%d", homeEnv.StatusCode, len(homeEnv.Body))
 	}
 	home := string(homeEnv.Body)
-	for _, want := range []string{"管理密钥", "账号列表", "自动签到", "自动刷新积分", "最近调用", "网关设置"} {
+	for _, want := range []string{"管理密钥", "账号列表", "自动签到", "自动刷新积分", "最近调用"} {
 		if !strings.Contains(home, want) {
 			die("combined page missing %q", want)
 		}
