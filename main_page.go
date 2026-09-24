@@ -297,7 +297,17 @@ func renderMainPage() string {
 	b.WriteString(`<div class="note">密钥仅保存在本机浏览器（localStorage），不会上传到插件或服务器。</div>`)
 	b.WriteString(`</div>`)
 
-	b.WriteString(`<div class="card"><h2>网关设置</h2><table>`)
+	b.WriteString(`<div class="card"><h2>版本切换 <span class="hint">国内版与国际版</span></h2>
+<div class="seg" id="variantSeg">
+<button type="button" class="active" onclick="setVariant('auto')">自动</button>
+<button type="button" onclick="setVariant('cn')">国内版</button>
+<button type="button" onclick="setVariant('ai')">国际版</button>
+</div>
+<div class="note">修改后保存设置生效。</div>
+<div class="muted small" id="variantMsg"></div>
+</div>
+
+<div class="card"><h2>网关设置</h2><table>`)
 	row := func(k string, v any) {
 		b.WriteString(`<tr><td><code>` + html.EscapeString(k) + `</code></td><td>` +
 			html.EscapeString(fmt.Sprint(v)) + `</td></tr>`)
