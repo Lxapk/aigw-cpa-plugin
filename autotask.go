@@ -83,6 +83,9 @@ func (a *accountTasks) due(spec taskSpec, now time.Time) bool {
 }
 
 func (a *accountTasks) runState(kind taskKind) *taskRunState {
+	if a == nil {
+		return nil
+	}
 	switch kind {
 	case taskKindCheckin:
 		return a.Checkin
@@ -232,6 +235,9 @@ func taskStatusJSON() map[string]any {
 
 	accounts := make([]map[string]any, 0, len(e.accounts))
 	for _, at := range e.accounts {
+		if at == nil {
+			continue
+		}
 		at.mu.Lock()
 		tasks := make([]map[string]any, 0)
 		for _, spec := range defaultTasks {
