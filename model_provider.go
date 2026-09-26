@@ -186,17 +186,34 @@ func modelsToInfo(models []workBuddyModel) []pluginapi.ModelInfo {
 	if len(models) == 0 {
 		return nil
 	}
+	// The ID is prefixed with the provider key. Without it a bare
+	// "deepseek-v4-flash" collides with the same model served by another plugin
+	// (trae advertises "DeepSeek-V4-Flash"), and the merged list gives the
+	// client no way to say which upstream it means. The prefix is also what
+	// model.route already expects: splitProviderPrefix() accepts
+	// "codebuddy/<model>", so the advertised and accepted names now agree.
+	//
+	// Casing is preserved: the upstream distinguishes models by exact spelling,
+	// and the catalogue is the authority on it.
 	out := make([]pluginapi.ModelInfo, 0, len(models))
 	for _, m := range models {
+		native := strings.TrimSpace(m.ID)
+		if native == "" {
+			continue
+		}
+		qualified := qualifyModelID(native)
 		info := pluginapi.ModelInfo{
-			// ID is what clients send in "model"; we expose the provider-native
-			// name so no mapping layer is needed.
-			ID:          m.ID,
-			Name:        m.ID,
+			// ID is what clients send in "model".
+			ID:   qualified,
+			Name: qualified,
+			// Version carries the bare upstream name: it must not be sent with
+			// the prefix, and it is useful in diagnostics.
+			Version:     native,
 			Object:      "model",
 			OwnedBy:     workBuddyProviderKey,
 			Type:        "chat",
-			DisplayName: m.DisplayName,
+			DisplayName: firstNonEmpty(m.DisplayName, native),
+			Description: "WorkBuddy 上游模型（原生名 " + native + "）",
 		}
 		if m.MaxInputTokens > 0 {
 			info.InputTokenLimit = m.MaxInputTokens
@@ -206,6 +223,25 @@ func modelsToInfo(models []workBuddyModel) []pluginapi.ModelInfo {
 		out = append(out, info)
 	}
 	return out
+}
+
+// qualifyModelID prepends the provider key unless the name already carries it,
+// so an ID never gains the prefix twice.
+func qualifyModelID(native string) string {
+	if strings.HasPrefix(strings.ToLower(native), workBuddyProviderKey+"/") {
+		return native
+	}
+	return workBuddyProviderKey + "/" + native
+}
+
+// nativeModelID strips a recognised provider prefix, yielding the name the
+// upstream expects. Unprefixed names pass through unchanged.
+func nativeModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if provider, rest, ok := splitProviderPrefix(model); ok && isWorkBuddyProvider(provider) {
+		return rest
+	}
+	return model
 }
 
 // isWorkBuddyProvider reports whether a provider/type field names this plugin.

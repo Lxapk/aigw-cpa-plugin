@@ -603,6 +603,104 @@ func TestGrowthDiagnosticsAreBounded(t *testing.T) {
 	}
 }
 
+// ---- model qualification -------------------------------------------------
+
+// TestModelIDsCarryTheProviderPrefix is the guard for the reported collision:
+// the list showed a bare "deepseek-v4.1-flash" alongside another plugin's
+// "DeepSeek-V4-Flash", with nothing telling the client which upstream it meant.
+func TestModelIDsCarryTheProviderPrefix(t *testing.T) {
+	models := modelsToInfo([]workBuddyModel{
+		{ID: "deepseek-v4.1-flash", DisplayName: "DeepSeek V4.1 Flash"},
+		{ID: "DeepSeek-V4-Flash", DisplayName: "DeepSeek V4 Flash"},
+	})
+	if len(models) != 2 {
+		t.Fatalf("got %d models", len(models))
+	}
+	if models[0].ID != "codebuddy/deepseek-v4.1-flash" {
+		t.Fatalf("ID = %q, want the prefixed form", models[0].ID)
+	}
+	// Casing is preserved: the upstream distinguishes models by exact spelling.
+	if models[1].ID != "codebuddy/DeepSeek-V4-Flash" {
+		t.Fatalf("ID = %q, want casing preserved", models[1].ID)
+	}
+	// The bare name survives in Version so the upstream call stays correct.
+	if models[1].Version != "DeepSeek-V4-Flash" {
+		t.Fatalf("Version = %q, want the bare name", models[1].Version)
+	}
+}
+
+// TestQualifyModelIDIsIdempotent guards against a double prefix.
+func TestQualifyModelIDIsIdempotent(t *testing.T) {
+	if got := qualifyModelID("deepseek-v4-flash"); got != "codebuddy/deepseek-v4-flash" {
+		t.Fatalf("qualifyModelID = %q", got)
+	}
+	if got := qualifyModelID("codebuddy/deepseek-v4-flash"); got != "codebuddy/deepseek-v4-flash" {
+		t.Fatalf("a prefixed id gained the prefix again: %q", got)
+	}
+	// The display name WorkBuddy maps to the same key, so it must not double up
+	// either.
+	if got := qualifyModelID("CodeBuddy/deepseek-v4-flash"); got != "CodeBuddy/deepseek-v4-flash" {
+		t.Fatalf("a differently-cased prefix was not recognised: %q", got)
+	}
+}
+
+// TestNativeModelIDStripsThePrefix checks the outbound direction: the upstream
+// must never receive the prefix.
+func TestNativeModelIDStripsThePrefix(t *testing.T) {
+	cases := map[string]string{
+		"codebuddy/deepseek-v4-flash": "deepseek-v4-flash",
+		"CodeBuddy/deepseek-v4-flash": "deepseek-v4-flash",
+		"workbuddy/glm-5.2":           "glm-5.2",
+		"deepseek-v4-flash":           "deepseek-v4-flash",
+		"trae/DeepSeek-V4-Flash":      "trae/DeepSeek-V4-Flash", // another provider's prefix is left alone
+	}
+	for in, want := range cases {
+		if got := nativeModelID(in); got != want {
+			t.Errorf("nativeModelID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestAdvertisedNameIsAcceptedByRoute closes the loop: the name the client sees
+// in the model list must be the name model.route accepts.
+func TestAdvertisedNameIsAcceptedByRoute(t *testing.T) {
+	resetState()
+
+	advertised := modelsToInfo([]workBuddyModel{{ID: "deepseek-v4.1-flash"}})[0].ID
+	if advertised != "codebuddy/deepseek-v4.1-flash" {
+		t.Fatalf("advertised id = %q", advertised)
+	}
+
+	body, _ := json.Marshal(map[string]any{"model": advertised})
+	raw, errRoute := handleMethod(pluginabi.MethodModelRoute, mustJSON(pluginapi.ModelRouteRequest{
+		SourceFormat:   "chat-completions",
+		RequestedModel: advertised,
+		Body:           body,
+		AvailableProviders: []string{
+			workBuddyProviderKey,
+		},
+	}))
+	if errRoute != nil {
+		t.Fatal(errRoute)
+	}
+	var env struct {
+		Result struct {
+			Handled     bool   `json:"Handled"`
+			TargetModel string `json:"TargetModel"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal: %v; raw=%s", err, raw)
+	}
+	if !env.Result.Handled {
+		t.Fatal("model.route rejected the id advertised in the model list")
+	}
+	// The upstream must receive the bare name.
+	if env.Result.TargetModel != "deepseek-v4.1-flash" {
+		t.Fatalf("TargetModel = %q, want the bare upstream name", env.Result.TargetModel)
+	}
+}
+
 func TestTruncateForLog(t *testing.T) {
 	long := strings.Repeat("x", 500)
 	got := truncateForLog([]byte(long), 100)

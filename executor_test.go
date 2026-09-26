@@ -300,12 +300,17 @@ func TestModelForAuthReturnsCatalogue(t *testing.T) {
 	if len(out.Models) != 2 {
 		t.Fatalf("models = %+v", out.Models)
 	}
-	if out.Models[0].ID != "m-a" || out.Models[0].DisplayName != "Model A" {
+	if out.Models[0].ID != "codebuddy/m-a" || out.Models[0].DisplayName != "Model A" {
 		t.Errorf("models[0] = %+v", out.Models[0])
 	}
-	// ID must be the provider-native name so no mapping layer is needed.
-	if out.Models[0].Name != "m-a" {
-		t.Errorf("Name = %q, want m-a", out.Models[0].Name)
+	// ID carries the provider prefix so a client can tell this upstream apart
+	// from another plugin serving a same-named model; Version keeps the bare
+	// upstream name for diagnostics.
+	if out.Models[0].Name != "codebuddy/m-a" {
+		t.Errorf("Name = %q, want codebuddy/m-a", out.Models[0].Name)
+	}
+	if out.Models[0].Version != "m-a" {
+		t.Errorf("Version = %q, want the bare upstream name m-a", out.Models[0].Version)
 	}
 	if out.Models[0].InputTokenLimit != 1000 {
 		t.Errorf("InputTokenLimit = %d", out.Models[0].InputTokenLimit)
@@ -345,12 +350,12 @@ func TestModelForAuthUnparseableAuthYieldsFallback(t *testing.T) {
 	}
 	var sawDeepSeek bool
 	for _, m := range out.Models {
-		if m.ID == "deepseek-v4-flash" {
+		if m.ID == "codebuddy/deepseek-v4-flash" {
 			sawDeepSeek = true
 		}
 	}
 	if !sawDeepSeek {
-		t.Fatalf("fallback list missing deepseek-v4-flash: %+v", out.Models)
+		t.Fatalf("fallback list missing codebuddy/deepseek-v4-flash: %+v", out.Models)
 	}
 }
 
@@ -384,7 +389,7 @@ func TestModelStaticServesCachedCatalogue(t *testing.T) {
 	res := callOK(t, pluginabi.MethodModelStatic, pluginapi.StaticModelRequest{})
 	var out pluginapi.ModelResponse
 	mustDecode(t, res, &out)
-	if len(out.Models) != 1 || out.Models[0].ID != "cached-1" {
+	if len(out.Models) != 1 || out.Models[0].ID != "codebuddy/cached-1" {
 		t.Fatalf("models = %+v", out.Models)
 	}
 }
@@ -900,7 +905,7 @@ func TestModelStaticFetchesCatalogueWhenCacheEmpty(t *testing.T) {
 	if len(out.Models) == 0 {
 		t.Fatal("model.static should fetch the catalogue rather than return empty")
 	}
-	if out.Models[0].ID != "deepseek-v4.1-flash" {
+	if out.Models[0].ID != "codebuddy/deepseek-v4.1-flash" {
 		t.Fatalf("models = %+v", out.Models)
 	}
 }
