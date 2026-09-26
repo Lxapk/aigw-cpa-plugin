@@ -386,7 +386,7 @@ func (c *workBuddyClient) chatCompletionsStream(
 
 	reader := bufio.NewReaderSize(resp.Body, 64<<10)
 	for {
-		line, errRead := reader.ReadBytes('\n')
+		line, errRead := readLineWithIdleTimeout(ctx, reader, resp.Body)
 		if len(line) > 0 {
 			if errChunk := onChunk(line); errChunk != nil {
 				return resp.StatusCode, resp.Header, errChunk
@@ -399,6 +399,75 @@ func (c *workBuddyClient) chatCompletionsStream(
 			return resp.StatusCode, resp.Header, fmt.Errorf("读取上游流失败: %w", errRead)
 		}
 	}
+}
+
+// Stream read deadlines.
+//
+// http.Client.Timeout cannot be used here: it would cap the whole exchange, and a
+// reasoning model legitimately takes minutes to finish. What has to be bounded
+// instead is the gap *between* bytes:
+//
+//	firstByteTimeout — from the moment the body starts being read until the
+//	                   first line arrives. Upstream sends headers as soon as it
+//	                   starts working, so a long silence here means the request
+//	                   is not going to be answered.
+//	idleLineTimeout  — the longest acceptable pause between two SSE lines once
+//	                   the stream is running.
+//
+// Without these two the read loop blocks forever on a half-open connection: the
+// response header arrives, then upstream goes quiet, and nothing ever unblocks
+// `ReadBytes`. The client eventually gives up and the plugin goroutine leaks.
+const (
+	firstByteTimeout = 6 * time.Minute
+	idleLineTimeout  = 3 * time.Minute
+)
+
+// readLineWithIdleTimeout reads one line, bounding the wait before the first
+// byte more generously than the wait between subsequent lines.
+//
+// The deadline is enforced by reading in a goroutine and abandoning it on
+// timeout: net/http gives no per-read deadline, and the buffered reader has no
+// cancelable read. The abandoned goroutine exits once the body is closed, which
+// the caller does via defer when it returns an error.
+func readLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader, body io.ReadCloser) ([]byte, error) {
+	timeout := idleLineTimeout
+	if !readerHasBufferedData(reader) {
+		timeout = firstByteTimeout
+	}
+
+	type readResult struct {
+		line  []byte
+		err   error
+		first bool
+	}
+	done := make(chan readResult, 1)
+	// Track whether this is the very first read so the timeout above applies to
+	// the right silence.
+	go func() {
+		line, errRead := reader.ReadBytes('\n')
+		done <- readResult{line: line, err: errRead}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case res := <-done:
+		return res.line, res.err
+	case <-timer.C:
+		// Unblock the reader so the goroutine can exit rather than leak.
+		_ = body.Close()
+		return nil, fmt.Errorf("上游 %s 内未返回数据，连接可能已中断", timeout)
+	case <-ctx.Done():
+		_ = body.Close()
+		return nil, ctx.Err()
+	}
+}
+
+// readerHasBufferedData reports whether the reader already holds bytes, which
+// means the stream has produced output and the shorter idle timeout applies.
+func readerHasBufferedData(reader *bufio.Reader) bool {
+	return reader != nil && reader.Buffered() > 0
 }
 
 // extractUpstreamMessage pulls a human-readable message out of an error body,

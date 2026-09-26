@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -185,10 +187,36 @@ func executorExecute(request []byte) ([]byte, error) {
 // Therefore we strip the SSE framing ("data: " prefix, trailing newlines) and
 // forward only the JSON object. The terminal "[DONE]" sentinel is dropped too:
 // CPA emits it after the executor's stream ends.
+// executorExecuteStream answers executor.execute_stream.
+//
+// Shape follows the official claude-web-search-router example
+// (examples/plugin/claude-web-search-router/go/execute_stream.go):
+//
+//   - stream_id is required; without it the host has nowhere to route chunks.
+//     Answering with an error is what that example does, rather than guessing at
+//     a buffered fallback.
+//   - The upstream read happens in a background goroutine, so this returns
+//     immediately and the host can start draining the stream. The host buffers
+//     emitted chunks in a 16-slot queue that it only starts reading after this
+//     call returns (pluginhost.streamBridgeBufferSize), so a synchronous
+//     implementation blocks on the 17th chunk.
+//   - The response carries Content-Type: text/event-stream, matching what the
+//     example returns.
+//
+// Chunk payloads are the provider's native frames — bare JSON objects, no "data:"
+// prefix and no [DONE] sentinel. That is what the host expects: it runs the
+// payload through sdktranslator.TranslateStream and writes its own
+// "data: [DONE]" tail (pluginhost.executorStreamDonePayload), so a prefix added
+// here would end up doubled.
 func executorExecuteStream(request []byte) ([]byte, error) {
 	req, body, creds, errDecode := decodeExecutorRequest(request)
 	if errDecode != nil {
 		return errorEnvelope("invalid_executor_request", errDecode.Error(), 400), nil
+	}
+
+	streamID := strings.TrimSpace(req.StreamID)
+	if streamID == "" {
+		return errorEnvelope("executor_error", "stream_id is required for executor.execute_stream", 400), nil
 	}
 
 	upstreamBody, _, errPrepare := prepareUpstreamBody(body, req.Model)
@@ -196,37 +224,105 @@ func executorExecuteStream(request []byte) ([]byte, error) {
 		return errorEnvelope("invalid_request", errPrepare.Error(), 400), nil
 	}
 
-	var chunks []pluginapi.ExecutorStreamChunk
+	go pumpUpstreamStreamIntoHost(streamID, creds, upstreamBody)
+
+	return okEnvelope(streamChunkEnvelope{
+		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+	})
+}
+
+// pumpUpstreamStreamIntoHost reads the upstream stream, forwards each frame to
+// the client, then closes the stream.
+//
+// Runs in its own goroutine so executorExecuteStream can return before the first
+// chunk exists; see that function for why. The recover mirrors the official
+// example: a panic here would otherwise leave the stream open and the client
+// waiting on a connection nobody will ever close.
+func pumpUpstreamStreamIntoHost(streamID string, creds *workBuddyCredentials, upstreamBody []byte) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			closeHostStream(streamID, fmt.Sprintf("upstream stream panic: %v", recovered))
+		}
+	}()
+
+	var emitted int
 	ctx := context.Background()
-	_, headers, errStream := workBuddyUpstream.chatCompletionsStream(ctx, creds, upstreamBody, func(frame []byte) error {
+	_, _, errStream := workBuddyUpstream.chatCompletionsStream(ctx, creds, upstreamBody, func(frame []byte) error {
 		payload, keep := sseFrameToBareJSON(frame)
 		if !keep {
 			return nil
 		}
-		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: payload})
+		if errEmit := emitStreamChunk(streamID, payload); errEmit != nil {
+			// The client is gone; stop reading upstream.
+			return errEmit
+		}
+		emitted++
 		return nil
 	})
-	if errStream != nil {
-		// Surface the failure as a terminal error chunk so the client sees an
-		// error event rather than a silently truncated stream.
-		errFrame, _ := json.Marshal(map[string]any{
-			"error": map[string]any{
-				"message": errStream.Error(),
-				"type":    "upstream_error",
-			},
-		})
-		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: errFrame})
-		return okEnvelope(streamChunkEnvelope{
-			Headers: filterResponseHeaders(headers),
-			Chunks:  chunks,
-		})
-	}
 
-	return okEnvelope(streamChunkEnvelope{
-		Headers: filterResponseHeaders(headers),
-		Chunks:  chunks,
+	if errStream != nil {
+		// Report the failure on the stream rather than ending it silently, so the
+		// client learns why the answer stopped.
+		message := errStream.Error()
+		if emitted == 0 {
+			message = "上游未返回任何内容: " + message
+		}
+		closeHostStream(streamID, message)
+		return
+	}
+	if emitted == 0 {
+		closeHostStream(streamID, "上游未返回任何内容")
+		return
+	}
+	closeHostStream(streamID, "")
+}
+
+// emitStreamChunk pushes one chunk to the client through the host.
+//
+// Mirrors emitPluginStreamChunk from the official example, including the request
+// shape (rpcStreamEmitRequest).
+func emitStreamChunk(streamID string, payload []byte) error {
+	if strings.TrimSpace(streamID) == "" {
+		return errNoStreamID
+	}
+	_, errEmit := callHost(pluginabi.MethodHostStreamEmit, rpcStreamEmitRequest{
+		StreamID: streamID,
+		Payload:  payload,
+	})
+	return errEmit
+}
+
+// closeHostStream ends a host stream, optionally attaching an error.
+//
+// Mirrors closePluginStream from the official example.
+func closeHostStream(streamID string, errorMessage string) {
+	if strings.TrimSpace(streamID) == "" {
+		return
+	}
+	_, _ = callHost(pluginabi.MethodHostStreamClose, rpcStreamCloseRequest{
+		StreamID: streamID,
+		Error:    strings.TrimSpace(errorMessage),
 	})
 }
+
+// rpcStreamEmitRequest mirrors pluginhost.rpcStreamEmitRequest.
+//
+// Payload is []byte so encoding/json emits base64, which is how the host decodes
+// it (the same shape the official examples use).
+type rpcStreamEmitRequest struct {
+	StreamID string `json:"stream_id"`
+	Payload  []byte `json:"payload,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// rpcStreamCloseRequest mirrors pluginhost.rpcStreamCloseRequest.
+type rpcStreamCloseRequest struct {
+	StreamID string `json:"stream_id"`
+	Error    string `json:"error,omitempty"`
+}
+
+// errNoStreamID reports that no host stream id was supplied with the call.
+var errNoStreamID = errors.New("plugin stream id is required")
 
 // streamChunkEnvelope mirrors pluginhost.rpcExecutorStreamResponse.
 //

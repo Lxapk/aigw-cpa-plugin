@@ -631,6 +631,74 @@ curl -N http://127.0.0.1:8317/v1/chat/completions \
 
 `data:` 前缀和 SSE 空行由 CPA 负责添加。
 
+### 真流式：必须异步返回（v0.13.28 修复）
+
+**症状**：客户端调用后**长时间无任何输出，然后直接断开**；CPA 日志显示
+`200 | 1m59s | POST /v1/chat/completions`（耗时近两分钟但「成功」）。
+
+**根因**：`executor.execute_stream` **把上游的 chunk 全部收集完才返回**。
+
+```go
+var chunks []pluginapi.ExecutorStreamChunk
+// ...收完整个流...
+return okEnvelope(streamChunkEnvelope{Chunks: chunks})
+```
+
+于是**整个生成期间客户端零字节**。思考模型（如 `deepseek-v4.1-flash`）首个
+token 就要几十秒，客户端等不过自己的读超时，直接断开 —— 看起来就是
+「没反应、直接中断」。
+
+**为什么不能改成同步 emit 就算了**：宿主把 emit 的 chunk 放进一个
+**16 槽的缓冲**（`pluginhost.streamBridgeBufferSize`），而**消费这个缓冲的
+goroutine 要等 `execute_stream` 返回之后才启动**：
+
+```go
+queue := make([]pluginapi.ExecutorStreamChunk, 0, 16)
+if len(queue) < streamBridgeBufferSize {
+    emitC = s.emits        // 队列满 → emitC = nil → emit 永久阻塞
+}
+```
+
+所以同步实现会在**第 17 个 chunk 卡死**。
+
+**正确做法**（与官方的
+`examples/plugin/claude-web-search-router/go/execute_stream.go` 一致）：
+
+```go
+streamID := strings.TrimSpace(req.StreamID)
+if streamID == "" {
+    return errorEnvelope("executor_error", "stream_id is required ...", 400), nil
+}
+go pumpUpstreamStreamIntoHost(streamID, creds, upstreamBody)   // 后台读上游
+return okEnvelope(streamChunkEnvelope{
+    Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+})
+```
+
+即：**立即返回**，让宿主开始消费；**后台 goroutine** 用
+`host.stream.emit` 逐块推送，结束时 `host.stream.close`。这样首个 chunk 一到
+就送到客户端。
+
+**顺带修掉的一个隐患**：上游返回错误（如频率限制）时，此前错误会**在缓冲区里
+静静等着**，客户端只会看到「挂住然后断开」。现在错误通过 `host.stream.close`
+立即传达，客户端能看到具体原因：
+
+```
+上游未返回任何内容: 您的使用量已超出频率限制，将在 2026-09-27 20:03:46 UTC+8 重置…
+```
+
+**上游半开挂起的防护**：`http.Client` 只设了 `ResponseHeaderTimeout`，响应体
+一旦开始读取就**没有任何超时**，上游静默挂起会让读循环永久阻塞。现在加了两道
+（`workbuddy_client.go`）：
+
+| 超时 | 值 | 作用 |
+|---|---|---|
+| `firstByteTimeout` | 6 分钟 | 从开始读 body 到第一个字节的等待上限 |
+| `idleLineTimeout` | 3 分钟 | 流运行中两行之间的最长停顿 |
+
+（不能用 `http.Client.Timeout`：它会给整个交换设上限，而思考模型本来就
+可能跑好几分钟。）
+
 ### 账号落盘（v0.3.1 修复）
 
 `auth_not_found` 表示 CPA 找不到可用于 `codebuddy` 的凭据。v0.3.0 有两个缺陷会导致

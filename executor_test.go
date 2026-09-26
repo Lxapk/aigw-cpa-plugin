@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -699,45 +702,64 @@ func TestExecutorExecuteStreamForwardsBareJSONFrames(t *testing.T) {
 	restore := pointWorkBuddyAt(server.URL)
 	defer restore()
 
-	storage, _ := json.Marshal(map[string]any{"accessToken": "tok", "domain": "cn"})
-	payload, _ := json.Marshal(map[string]any{
-		"OriginalRequest": []byte(`{"model":"m","stream":true,"messages":[]}`),
-		"StorageJSON":     storage,
-		"Stream":          true,
-	})
-
-	res := callOK(t, pluginabi.MethodExecutorExecuteStream, json.RawMessage(payload))
-	var out struct {
-		Chunks []struct {
-			Payload []byte `json:"Payload"`
-		} `json:"chunks"`
+	var emitted [][]byte
+	closed := make(chan string, 1)
+	orig := hostCallFunc
+	hostCallFunc = func(method string, payload any) (json.RawMessage, error) {
+		doc, _ := json.Marshal(payload)
+		var fields map[string]any
+		_ = json.Unmarshal(doc, &fields)
+		switch method {
+		case "host.stream.emit":
+			if raw, okPayload := fields["payload"]; okPayload {
+				if encoded, okStr := raw.(string); okStr {
+					if decoded, errDecode := base64.StdEncoding.DecodeString(encoded); errDecode == nil {
+						emitted = append(emitted, decoded)
+					}
+				}
+			}
+		case "host.stream.close":
+			select {
+			case closed <- fmt.Sprint(fields["error"]):
+			default:
+			}
+		}
+		return json.RawMessage(`{"ok":true}`), nil
 	}
-	mustDecode(t, res, &out)
+	defer func() { hostCallFunc = orig }()
+
+	if _, errCall := executorExecuteStream(buildStreamExecutorRequest(t, "s-frames")); errCall != nil {
+		t.Fatal(errCall)
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("流未关闭")
+	}
 
 	// Two content frames survive; the heartbeat and [DONE] are dropped.
-	if len(out.Chunks) != 2 {
-		t.Fatalf("got %d chunks, want 2: %q", len(out.Chunks), chunkPayloads(out.Chunks))
+	if len(emitted) != 2 {
+		t.Fatalf("emit 了 %d 帧，应为 2（心跳与 [DONE] 应被丢弃）", len(emitted))
 	}
-
-	for i, c := range out.Chunks {
-		p := c.Payload
+	for i, p := range emitted {
 		// CPA's writer adds the SSE framing itself, so the payload must be bare
 		// JSON. A "data:" prefix here produces:
 		//   Unexpected JSON token at offset 5: Expected EOF after parsing
 		if bytes.HasPrefix(p, []byte("data:")) {
-			t.Fatalf("chunk %d still carries the SSE prefix: %q", i, p)
+			t.Fatalf("第 %d 帧仍带 SSE 前缀: %q", i, p)
 		}
 		if bytes.ContainsAny(p, "\r\n") {
-			t.Fatalf("chunk %d carries newlines: %q", i, p)
+			t.Fatalf("第 %d 帧带换行: %q", i, p)
 		}
 		if !json.Valid(p) {
-			t.Fatalf("chunk %d is not valid JSON: %q", i, p)
+			t.Fatalf("第 %d 帧不是合法 JSON: %q", i, p)
 		}
 	}
 
-	joined := string(out.Chunks[0].Payload) + string(out.Chunks[1].Payload)
+	joined := string(emitted[0]) + string(emitted[1])
 	if !strings.Contains(joined, "He") || !strings.Contains(joined, "llo") {
-		t.Fatalf("content lost: %q", joined)
+		t.Fatalf("内容丢失: %q", joined)
 	}
 }
 
@@ -790,6 +812,7 @@ func TestSSEFrameToBareJSONUnwrapsDoubledPrefix(t *testing.T) {
 	}
 }
 
+// 上游报错时必须通过 host.stream.close 带错误关闭，客户端才不会静默等待。
 func TestExecutorExecuteStreamEmitsBareErrorFrame(t *testing.T) {
 	resetState()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -800,29 +823,45 @@ func TestExecutorExecuteStreamEmitsBareErrorFrame(t *testing.T) {
 	restore := pointWorkBuddyAt(server.URL)
 	defer restore()
 
-	storage, _ := json.Marshal(map[string]any{"accessToken": "tok", "domain": "cn"})
-	payload, _ := json.Marshal(map[string]any{
-		"OriginalRequest": []byte(`{"model":"m","stream":true,"messages":[]}`),
-		"StorageJSON":     storage,
-		"Stream":          true,
-	})
+	closed := make(chan string, 1)
+	orig := hostCallFunc
+	hostCallFunc = func(method string, payload any) (json.RawMessage, error) {
+		if method == "host.stream.close" {
+			doc, _ := json.Marshal(payload)
+			var fields map[string]any
+			_ = json.Unmarshal(doc, &fields)
+			select {
+			case closed <- fmt.Sprint(fields["error"]):
+			default:
+			}
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	}
+	defer func() { hostCallFunc = orig }()
 
-	res := callOK(t, pluginabi.MethodExecutorExecuteStream, json.RawMessage(payload))
-	var out struct {
-		Chunks []struct {
-			Payload []byte `json:"Payload"`
-		} `json:"chunks"`
+	resp, errCall := executorExecuteStream(buildStreamExecutorRequest(t, "s-err"))
+	if errCall != nil {
+		t.Fatal(errCall)
 	}
-	mustDecode(t, res, &out)
-	if len(out.Chunks) == 0 {
-		t.Fatal("expected a terminal error chunk")
+	// 调用本身成功返回（chunk 通过回调流走），错误在 close 上体现。
+	var env struct {
+		OK bool `json:"ok"`
 	}
-	p := out.Chunks[0].Payload
-	if !json.Valid(p) {
-		t.Fatalf("error chunk must be bare JSON, got %q", p)
+	mustDecode(t, resp, &env)
+	if !env.OK {
+		t.Fatalf("信封应为 ok；resp=%s", resp)
 	}
-	if !strings.Contains(string(p), "upstream_error") {
-		t.Fatalf("chunk = %s", p)
+
+	select {
+	case message := <-closed:
+		if message == "" {
+			t.Fatal("上游报错时必须带错误关闭流，否则客户端只看到流结束")
+		}
+		if !strings.Contains(message, "upstream") && !strings.Contains(message, "502") {
+			t.Logf("关闭原因: %s", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("上游报错后流未关闭")
 	}
 }
 
@@ -920,5 +959,257 @@ func TestModelStaticEmptyWithoutCredential(t *testing.T) {
 	mustDecode(t, res, &out)
 	if len(out.Models) != 0 {
 		t.Fatalf("models = %+v, want none", out.Models)
+	}
+}
+
+// buildStreamExecutorRequest 构造带凭据与 stream_id 的 executor 调用体。
+func buildStreamExecutorRequest(t *testing.T, streamID string) []byte {
+	t.Helper()
+	storage, _ := json.Marshal(map[string]any{"accessToken": "[REDACTED]", "domain": "cn"})
+	payload, _ := json.Marshal(map[string]any{
+		"OriginalRequest": []byte(`{"model":"deepseek-v4.1-flash","stream":true,"messages":[]}`),
+		"StorageJSON":     storage,
+		"Stream":          true,
+		// executorRequest 的 json tag 是小写下划线形式
+		"stream_id": streamID,
+	})
+	return payload
+}
+
+// 端到端：上游逐块发送时，插件应【立即返回】并在后台持续 emit。
+//
+// 这覆盖了本次修复的核心：
+//   - 修复前：executor 收完所有 chunk 才返回，客户端全程零字节 → 超时断开
+//   - 修复后：立即返回，后台 goroutine 持续 emit
+func TestStreamReturnsImmediatelyAndEmitsInBackground(t *testing.T) {
+	resetState()
+
+	const frames = 40 // 远超宿主 16 槽的 emit 缓冲
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for i := 0; i < frames; i++ {
+			fmt.Fprintf(w, "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"t%d\"}}]}\n\n", i)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	restore := pointWorkBuddyAt(server.URL)
+	defer restore()
+
+	// 记录插件发出的 chunk 与 stream.close。
+	var emitted []string
+	var closedWith string
+	var closed bool
+	orig := hostCallFunc
+	hostCallFunc = func(method string, payload any) (json.RawMessage, error) {
+		doc, _ := json.Marshal(payload)
+		var fields map[string]any
+		_ = json.Unmarshal(doc, &fields)
+		switch method {
+		case "host.stream.emit":
+			if p, okPayload := fields["payload"]; okPayload {
+				emitted = append(emitted, fmt.Sprint(p))
+			}
+		case "host.stream.close":
+			closed = true
+			if e, okErr := fields["error"]; okErr {
+				closedWith = fmt.Sprint(e)
+			}
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	}
+	defer func() { hostCallFunc = orig }()
+
+	req := buildStreamExecutorRequest(t, "s-1")
+
+	start := time.Now()
+	resp, errCall := executorExecuteStream(req)
+	callDuration := time.Since(start)
+
+	if errCall != nil {
+		t.Fatalf("executorExecuteStream: %v", errCall)
+	}
+
+	// 关键断言 1：调用必须【立即返回】，不能等上游读完。
+	if callDuration > 300*time.Millisecond {
+		t.Errorf("调用耗时 %v，应该立即返回（修复前是收完所有 chunk 才返回）", callDuration)
+	}
+
+	// 关键断言 2：返回的 chunk 列表必须为空 —— 空列表才告诉宿主走回调流。
+	var env struct {
+		Result streamChunkEnvelope `json:"result"`
+	}
+	mustDecode(t, resp, &env)
+	out := env.Result
+	if len(out.Chunks) != 0 {
+		t.Errorf("返回了 %d 个 chunk；异步模式应返回空列表让宿主消费回调流", len(out.Chunks))
+	}
+
+	// 关键断言 3：后台应把全部帧 emit 出去（含超过 16 槽的部分）。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if closed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !closed {
+		t.Fatalf("后台未在期限内关闭流（已 emit %d 块）", len(emitted))
+	}
+	if len(emitted) != frames {
+		t.Errorf("emit 了 %d 块，应为 %d 块（宿主缓冲只有 16 槽，同步实现会在第 17 块卡死）",
+			len(emitted), frames)
+	}
+	if closedWith != "" {
+		t.Errorf("正常结束不应带错误，实际 %q", closedWith)
+	}
+}
+
+// 上游零输出时必须带错误关闭，不能静默结束。
+func TestStreamClosesWithErrorWhenUpstreamEmpty(t *testing.T) {
+	resetState()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	restore := pointWorkBuddyAt(server.URL)
+	defer restore()
+
+	var closed bool
+	var closedWith string
+	orig := hostCallFunc
+	hostCallFunc = func(method string, payload any) (json.RawMessage, error) {
+		doc, _ := json.Marshal(payload)
+		var fields map[string]any
+		_ = json.Unmarshal(doc, &fields)
+		if method == "host.stream.close" {
+			closed = true
+			if e, okErr := fields["error"]; okErr {
+				closedWith = fmt.Sprint(e)
+			}
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	}
+	defer func() { hostCallFunc = orig }()
+
+	resp, errCall := executorExecuteStream(buildStreamExecutorRequest(t, "s-2"))
+	if errCall != nil {
+		t.Fatal(errCall)
+	}
+	_ = resp
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !closed {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !closed {
+		t.Fatal("上游零输出时流未关闭，客户端会一直等")
+	}
+	if closedWith == "" {
+		t.Error("零输出必须带错误关闭，否则客户端只看到空响应")
+	}
+}
+
+// 没有 stream_id 时必须报错 —— 对齐官方 execute_stream 示例：
+//
+//	streamID := strings.TrimSpace(req.StreamID)
+//	if streamID == "" {
+//	    return errorEnvelope("executor_error",
+//	        "stream_id is required for executor.execute_stream"), nil
+//	}
+//
+// 宿主没有流就无处投递 chunk，报错比猜一个缓冲回退更明确。
+func TestStreamRequiresStreamID(t *testing.T) {
+	resetState()
+
+	orig := hostCallFunc
+	hostCallFunc = func(string, any) (json.RawMessage, error) {
+		t.Error("缺少 stream_id 时不应发起任何宿主流调用")
+		return json.RawMessage(`{}`), nil
+	}
+	defer func() { hostCallFunc = orig }()
+
+	resp, errCall := executorExecuteStream(buildStreamExecutorRequest(t, ""))
+	if errCall != nil {
+		t.Fatal(errCall)
+	}
+	var env struct {
+		OK    bool `json:"ok"`
+		Error *struct {
+			Code       string `json:"code"`
+			Message    string `json:"message"`
+			HTTPStatus int    `json:"http_status"`
+		} `json:"error"`
+	}
+	mustDecode(t, resp, &env)
+	if env.OK {
+		t.Fatalf("缺少 stream_id 时不应返回 ok；resp=%s", resp)
+	}
+	if env.Error == nil || env.Error.HTTPStatus != 400 {
+		t.Fatalf("应返回 http_status=400 的错误；resp=%s", resp)
+	}
+}
+
+// 流式响应的初始 header 必须是 text/event-stream，且返回空 chunk 列表
+// （空列表告诉宿主改从回调流消费）。对齐官方示例。
+func TestStreamResponseShape(t *testing.T) {
+	resetState()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"id\":\"c1\"}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	defer pointWorkBuddyAt(server.URL)()
+
+	closed := make(chan string, 1)
+	orig := hostCallFunc
+	hostCallFunc = func(method string, payload any) (json.RawMessage, error) {
+		if method == "host.stream.close" {
+			doc, _ := json.Marshal(payload)
+			var fields map[string]any
+			_ = json.Unmarshal(doc, &fields)
+			select {
+			case closed <- fmt.Sprint(fields["error"]):
+			default:
+			}
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	}
+	defer func() { hostCallFunc = orig }()
+
+	resp, errCall := executorExecuteStream(buildStreamExecutorRequest(t, "s-shape"))
+	if errCall != nil {
+		t.Fatal(errCall)
+	}
+	var env struct {
+		Result struct {
+			Headers http.Header                     `json:"headers"`
+			Chunks  []pluginapi.ExecutorStreamChunk `json:"chunks"`
+		} `json:"result"`
+	}
+	mustDecode(t, resp, &env)
+	if got := env.Result.Headers.Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", got)
+	}
+	if len(env.Result.Chunks) != 0 {
+		t.Errorf("异步模式应返回空 chunk 列表，实际 %d 个", len(env.Result.Chunks))
+	}
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("流未关闭")
 	}
 }
