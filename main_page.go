@@ -511,6 +511,9 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 			}),
 		}, true
 
+	case "/models":
+		return handleModelsRequest(req)
+
 	case "/routing/status":
 		return managementResponse{
 			StatusCode: http.StatusOK,

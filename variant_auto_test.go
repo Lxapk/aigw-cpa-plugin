@@ -2009,3 +2009,67 @@ func TestAuthIdentifierEqualsProviderKey(t *testing.T) {
 		}
 	}
 }
+
+// ---- model catalogue self-check -------------------------------------------
+
+// TestModelsEndpointReportsPerAccount covers the self-check endpoint.
+//
+// It exists so an operator can see the catalogue the plugin would serve per
+// account — with the resolved variant, the API base and whether the answer came
+// from the cache — instead of reading one account at a time through CPA and
+// guessing which upstream answered.
+func TestModelsEndpointReportsPerAccount(t *testing.T) {
+	resetState()
+
+	res := callOK(t, pluginabi.MethodManagementHandle, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/workbuddy/models",
+	})
+	var mr managementResponse
+	if errUnmarshal := json.Unmarshal(res, &mr); errUnmarshal != nil {
+		t.Fatalf("unmarshal management response: %v", errUnmarshal)
+	}
+	if mr.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the route must be registered)", mr.StatusCode)
+	}
+
+	// The test harness has no host auth callback, so the endpoint reports that
+	// instead of a list. What matters here is that it is routed and answers
+	// rather than 404; the per-account content is verified against a live CPA.
+	if strings.Contains(string(mr.Body), "host callback unavailable") {
+		t.Skip("no host callback in the test harness; the live check covers the content")
+	}
+	var out struct {
+		OK       bool `json:"ok"`
+		Accounts []struct {
+			Variant string `json:"variant"`
+			Source  string `json:"source"`
+			Count   int    `json:"count"`
+			APIBase string `json:"api_base"`
+		} `json:"accounts"`
+	}
+	if errUnmarshal := json.Unmarshal([]byte(mr.Body), &out); errUnmarshal != nil {
+		t.Fatalf("unmarshal body: %v; body=%s", errUnmarshal, mr.Body)
+	}
+	if !out.OK {
+		t.Fatalf("ok=false: %s", mr.Body)
+	}
+}
+
+// TestModelCacheClear covers the stale-cache trap.
+//
+// The catalogue cache lives as long as the process, but the .so is replaced in
+// place on upgrade — so a catalogue fetched by the previous build keeps being
+// served for up to ten minutes. Someone updating to fix a short model list
+// would see the old, short list and conclude the fix had not worked.
+func TestModelCacheClear(t *testing.T) {
+	c := newModelCache()
+	c.put("k", []workBuddyModel{{ID: "m1"}})
+	if _, ok := c.get("k"); !ok {
+		t.Fatal("put/get round trip failed")
+	}
+	c.clear()
+	if _, ok := c.get("k"); ok {
+		t.Fatal("clear() left the entry behind; a stale catalogue would persist until the TTL expired")
+	}
+}

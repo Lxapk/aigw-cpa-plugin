@@ -43,6 +43,15 @@ func managementRegistration() managementRegistrationResponse {
 				Path:        "/workbuddy/accounts",
 				Description: "WorkBuddy account list as JSON (read from the auth store).",
 			},
+			{
+				// Self-check endpoint: shows the catalogue the plugin would
+				// return per account, with the resolved variant and API base,
+				// so an operator can verify what the upstream actually serves
+				// without reading one account at a time through CPA.
+				Method:      http.MethodGet,
+				Path:        "/workbuddy/models",
+				Description: "Per-account model catalogue as the plugin sees it (?refresh=1 bypasses the cache).",
+			},
 			// Account-switching strategy endpoints. The panel's strategy
 			// selector calls these, so a missing registration makes the
 			// buttons silently do nothing.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,18 @@ func (c *modelCache) put(key string, models []workBuddyModel) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[key] = modelCacheEntry{models: models, fetchedAt: time.Now()}
+}
+
+// clear drops every cached catalogue.
+//
+// Needed because the cache outlives a plugin upgrade: the .so is replaced in
+// place and the process keeps the old entries for up to ten minutes, so a fixed
+// model list can still render short right after updating. An operator can force
+// a refetch with /workbuddy/models?refresh=1.
+func (c *modelCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]modelCacheEntry)
 }
 
 func (c *modelCache) snapshot() []workBuddyModel {
@@ -265,3 +278,93 @@ func isWorkBuddyProvider(name string) bool {
 // with pluginName, which is why the routing key must not be returned from
 // auth.identifier.
 const workBuddyDisplayNameLower = "workbuddy"
+
+// handleModelsRequest answers GET /workbuddy/models.
+//
+// It reports the catalogue the plugin would return for each account, so the
+// operator can verify what the upstream actually serves without digging through
+// CPA's auth-file page (which only shows one account at a time and depends on
+// the host's plugin model registration).
+//
+// ?refresh=1 bypasses the 10-minute catalogue cache, which matters after an
+// upgrade: a stale entry would otherwise keep showing the previous, shorter
+// list for up to ten minutes.
+func handleModelsRequest(req pluginapi.ManagementRequest) (managementResponse, bool) {
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	if method != http.MethodGet && method != http.MethodPost {
+		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
+	}
+
+	if strings.TrimSpace(req.Query.Get("refresh")) != "" {
+		workBuddyModelCache.clear()
+	}
+
+	accounts, errCollect := collectCheckinAccounts()
+	if errCollect != nil {
+		return managementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    jsonResponseHeaders(),
+			Body:       mustJSON(map[string]any{"ok": false, "error": errCollect.Error()}),
+		}, true
+	}
+
+	type accountModels struct {
+		UID        string   `json:"uid"`
+		Label      string   `json:"label"`
+		Variant    string   `json:"variant"`
+		Source     string   `json:"source"`
+		Count      int      `json:"count"`
+		Models     []string `json:"models"`
+		Error      string   `json:"error,omitempty"`
+		FromCache  bool     `json:"from_cache"`
+		APIBase    string   `json:"api_base"`
+		ModelsPath string   `json:"models_path"`
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	out := make([]accountModels, 0, len(accounts))
+	for _, account := range accounts {
+		creds := account.Creds
+		variant := variantForCredentials(creds)
+		entry := accountModels{
+			UID:        creds.UID,
+			Label:      firstNonEmpty(account.Label, creds.label()),
+			Variant:    string(variant),
+			APIBase:    workBuddyBaseURL(creds.Domain),
+			ModelsPath: workBuddyModelsPath,
+		}
+
+		// Report whether the answer came from cache, so a stale list is obvious.
+		if _, okCache := workBuddyModelCache.get(creds.AuthKey()); okCache {
+			entry.FromCache = true
+		}
+
+		models, errList := workBuddyUpstream.listModels(ctx, creds)
+		if errList != nil {
+			entry.Error = errList.Error()
+			models = fallbackModelsCopy()
+			entry.Source = "builtin-fallback"
+		} else {
+			entry.Source = "upstream"
+		}
+		entry.Count = len(models)
+		entry.Models = make([]string, 0, len(models))
+		for _, m := range models {
+			entry.Models = append(entry.Models, qualifyModelID(m.ID))
+		}
+		out = append(out, entry)
+	}
+
+	return managementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    jsonResponseHeaders(),
+		Body: mustJSON(map[string]any{
+			"ok":       true,
+			"accounts": out,
+			"hint": "source=upstream 表示来自上游实时查询；builtin-fallback 表示上游查询失败，" +
+				"returned the five built-in models. Add ?refresh=1 to bypass the 10-minute cache.",
+		}),
+	}, true
+}
