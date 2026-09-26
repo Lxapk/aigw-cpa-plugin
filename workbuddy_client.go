@@ -33,8 +33,14 @@ import (
 // body is forwarded with only the model name normalised.
 
 const (
-	// workBuddyModelsPath is the model catalogue endpoint (a2/b.java:745).
-	workBuddyModelsPath = "/console/enterprises/personal/models"
+	// workBuddyModelsPath is the model catalogue endpoint.
+	//
+	// Measured against the live service: /v2/... answers 401 (exists, needs
+	// auth) on both realms, while the /console/... form answers 500 on the
+	// international host. A non-2xx response makes the caller fall back to the
+	// built-in catalogue, so the wrong path silently replaced the real model
+	// list with five hard-coded entries.
+	workBuddyModelsPath = "/v2/enterprises/personal/models"
 	// workBuddyChatPath is the OpenAI-compatible chat endpoint (a2/b.java:335).
 	workBuddyChatPath = "/v2/chat/completions"
 	// workBuddyCLIAgentName is the agent whose model list acts as a whitelist.
@@ -173,20 +179,37 @@ func parseWorkBuddyModels(body []byte) ([]workBuddyModel, error) {
 	//
 	// The list is now used only to ORDER the catalogue (cli models first), and
 	// every enabled model the provider returns is kept.
-	cliOrder := make(map[string]int)
+	// The "cli" agent's model list is a preference hint, not a hard filter.
+	//
+	// It was originally treated as a whitelist, which silently dropped models
+	// the provider had added but not yet listed under the "cli" agent — the
+	// user's `deepseek-v4.1-flash` disappeared exactly this way, and an
+	// unlisted model then failed routing with "unknown provider for model".
+	//
+	// Every agent's models are kept; the cli agent's order is used only to rank
+	// the catalogue.
+	cliPreferred := make(map[string]int)
+	agentIDs := make(map[string]int)
+	agentOrder := make([]string, 0)
 	for _, agent := range doc.Data.Agents {
-		if agent.Name != workBuddyCLIAgentName {
-			continue
-		}
-		for i, id := range agent.Models {
-			if _, exists := cliOrder[id]; !exists {
-				cliOrder[id] = i
+		for _, id := range agent.Models {
+			if id == "" {
+				continue
+			}
+			if _, exists := agentIDs[id]; !exists {
+				agentIDs[id] = len(agentOrder)
+				agentOrder = append(agentOrder, id)
+			}
+			if agent.Name == workBuddyCLIAgentName {
+				if _, exists := cliPreferred[id]; !exists {
+					cliPreferred[id] = len(cliPreferred)
+				}
 			}
 		}
 	}
 
 	seen := make(map[string]struct{})
-	out := make([]workBuddyModel, 0, len(doc.Data.Models))
+	out := make([]workBuddyModel, 0, len(doc.Data.Models)+len(agentOrder))
 	for _, m := range doc.Data.Models {
 		id := m.ID
 		if id == "" {
@@ -211,12 +234,36 @@ func parseWorkBuddyModels(body []byte) ([]workBuddyModel, error) {
 		})
 	}
 
+	// Fall back to the agent listing when the flat catalogue is absent.
+	//
+	// The two deployments differ: one returns data.models[] with display names
+	// and context windows, the other exposes only data.agents[].models[] as a
+	// list of ids (which is what the reference implementation reads). Reading
+	// only data.models[] therefore yielded an empty catalogue on the host that
+	// uses the agent shape, and the caller silently replaced the real list with
+	// the built-in fallback — so the panel showed five fixed models that the
+	// account may not even serve.
+	if len(out) == 0 && len(agentOrder) > 0 {
+		ids := append([]string(nil), agentOrder...)
+		for _, id := range ids {
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, workBuddyModel{
+				ID:             id,
+				DisplayName:    id,
+				MaxInputTokens: fallbackModelContextWindow,
+			})
+		}
+	}
+
 	// Order the catalogue so cli-listed models come first, preserving their
 	// declared order. Models the provider added without listing them under the
 	// "cli" agent follow, in the order the provider returned them.
 	sort.SliceStable(out, func(i, j int) bool {
-		oi, iIsCLI := cliOrder[out[i].ID]
-		oj, jIsCLI := cliOrder[out[j].ID]
+		oi, iIsCLI := cliPreferred[out[i].ID]
+		oj, jIsCLI := cliPreferred[out[j].ID]
 		switch {
 		case iIsCLI && jIsCLI:
 			return oi < oj

@@ -98,7 +98,14 @@ func prepareUpstreamBody(body []byte, requestedModel string) ([]byte, string, er
 	if errRewrite != nil {
 		return nil, "", errRewrite
 	}
-	return rewritten, model, nil
+	// Normalise the message array into the shape the upstream accepts. Without
+	// this a client sending a "developer" role or an interrupted tool batch gets
+	// "request illegal" (codes 11128 / 11148) for every turn.
+	normalised, errNormalise := normaliseUpstreamBody(rewritten)
+	if errNormalise != nil {
+		return nil, "", errNormalise
+	}
+	return normalised, model, nil
 }
 
 // executorExecute answers executor.execute (non-streaming).

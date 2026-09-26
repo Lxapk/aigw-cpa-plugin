@@ -1682,3 +1682,182 @@ func TestPanelChoicesPersistTogether(t *testing.T) {
 		t.Error("state file lost auth_supplier")
 	}
 }
+
+// ---- upstream body normalisation -----------------------------------------
+
+// TestNormaliseRewritesDeveloperRole is the guard for upstream code 11128.
+//
+// OpenAI's newer "developer" role (sent by the Codex CLI and current SDKs) is
+// what "system" used to be, but the upstream rejects it verbatim and answers
+// "request illegal" for the whole request.
+func TestNormaliseRewritesDeveloperRole(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[
+		{"role":"developer","content":"be terse"},
+		{"role":"user","content":"hi"}
+	]}`)
+	out, errNormalise := normaliseUpstreamBody(body)
+	if errNormalise != nil {
+		t.Fatal(errNormalise)
+	}
+	var doc struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if errUnmarshal := json.Unmarshal(out, &doc); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	for _, m := range doc.Messages {
+		if m.Role == "developer" {
+			t.Fatal("the developer role survived; the upstream rejects code 11128")
+		}
+	}
+	if doc.Messages[0].Role != "system" {
+		t.Fatalf("first role = %q, want system", doc.Messages[0].Role)
+	}
+	// The legacy function role maps to tool.
+	legacy := []byte(`{"messages":[{"role":"system","content":"s"},{"role":"function","content":"r"}]}`)
+	outLegacy, _ := normaliseUpstreamBody(legacy)
+	if strings.Contains(string(outLegacy), `"function"`) {
+		t.Fatal("the legacy function role survived")
+	}
+}
+
+// TestNormaliseRepacksInterruptedToolBatch is the guard for upstream code 11148.
+//
+// A tool result must be adjacent to the assistant message that requested it. An
+// intruding message between two parallel results breaks the pairing and the
+// upstream rejects every later turn of the conversation.
+func TestNormaliseRepacksInterruptedToolBatch(t *testing.T) {
+	body := []byte(`{"messages":[
+		{"role":"system","content":"s"},
+		{"role":"assistant","tool_calls":[{"id":"a"},{"id":"b"}]},
+		{"role":"tool","tool_call_id":"a","content":"ra"},
+		{"role":"user","content":"an intruder"},
+		{"role":"tool","tool_call_id":"b","content":"rb"}
+	]}`)
+	out, errNormalise := normaliseUpstreamBody(body)
+	if errNormalise != nil {
+		t.Fatal(errNormalise)
+	}
+	var doc struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if errUnmarshal := json.Unmarshal(out, &doc); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	roles := make([]string, 0, len(doc.Messages))
+	for _, m := range doc.Messages {
+		roles = append(roles, m.Role)
+	}
+	// The assistant must be followed directly by the results, with the intruder
+	// moved behind them; nothing is dropped.
+	joined := strings.Join(roles, ",")
+	if !strings.Contains(joined, "assistant,tool,tool,user") {
+		t.Fatalf("roles = %s, want the batch to be contiguous", joined)
+	}
+	if strings.Count(joined, "tool") != 2 {
+		t.Fatalf("a tool result was lost: %s", joined)
+	}
+	if !strings.Contains(joined, "user") {
+		t.Fatalf("the intruder was dropped instead of moved: %s", joined)
+	}
+}
+
+// TestNormaliseLeavesAConformingBodyAlone guards against needless rewriting: a
+// request the upstream already accepts must be passed through byte for byte.
+func TestNormaliseLeavesAConformingBodyAlone(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}`)
+	out, errNormalise := normaliseUpstreamBody(body)
+	if errNormalise != nil {
+		t.Fatal(errNormalise)
+	}
+	if string(out) != string(body) {
+		t.Fatalf("a conforming body was rewritten:\n in: %s\nout: %s", body, out)
+	}
+}
+
+// TestNormaliseInsertsLeadingSystemMessage covers the upstream's expectation
+// that a conversation opens with one.
+func TestNormaliseInsertsLeadingSystemMessage(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	out, errNormalise := normaliseUpstreamBody(body)
+	if errNormalise != nil {
+		t.Fatal(errNormalise)
+	}
+	var doc struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if errUnmarshal := json.Unmarshal(out, &doc); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	if len(doc.Messages) != 2 || doc.Messages[0].Role != "system" {
+		t.Fatalf("messages = %+v, want a leading system message", doc.Messages)
+	}
+}
+
+// TestNormaliseSurvivesMalformedInput: a body we cannot inspect must pass
+// through untouched rather than becoming a rewrite error.
+func TestNormaliseSurvivesMalformedInput(t *testing.T) {
+	for _, body := range []string{`not json`, `[]`, `{"messages":"nope"}`, `{"messages":[1,2]}`} {
+		out, errNormalise := normaliseUpstreamBody([]byte(body))
+		if errNormalise != nil {
+			t.Errorf("body %q produced an error: %v", body, errNormalise)
+		}
+		if string(out) != body {
+			t.Errorf("body %q was modified to %q", body, out)
+		}
+	}
+}
+
+// TestCatalogueParsesBothShapes covers the model-list fix: one deployment
+// returns data.models[] with display names, another exposes only
+// data.agents[].models[]. Reading just the first shape produced an empty
+// catalogue on the second, and the caller then silently swapped in the built-in
+// fallback — so the panel showed five fixed models instead of the real ones.
+func TestCatalogueParsesBothShapes(t *testing.T) {
+	// Flat shape.
+	flat := []byte(`{"code":0,"data":{"models":[{"id":"ds-1","name":"DS 1","maxInputTokens":1000}]}}`)
+	models, errFlat := parseWorkBuddyModels(flat)
+	if errFlat != nil {
+		t.Fatalf("flat: %v", errFlat)
+	}
+	if len(models) != 1 || models[0].ID != "ds-1" || models[0].DisplayName != "DS 1" {
+		t.Fatalf("flat shape parsed as %+v", models)
+	}
+
+	// Agent shape, as the reference implementation reads it.
+	agent := []byte(`{"code":0,"data":{"agents":[{"name":"cli","models":["m-a","m-b"]},{"name":"other","models":["m-c"]}]}}`)
+	models, errAgent := parseWorkBuddyModels(agent)
+	if errAgent != nil {
+		t.Fatalf("agent: %v", errAgent)
+	}
+	if len(models) != 3 {
+		t.Fatalf("agent shape parsed as %+v, want 3 models", models)
+	}
+	if models[0].ID != "m-a" || models[1].ID != "m-b" {
+		t.Fatalf("cli order not preserved: %+v", models)
+	}
+	// Context window falls back to the documented default when the agent shape
+	// carries none.
+	if models[0].MaxInputTokens != fallbackModelContextWindow {
+		t.Fatalf("context window = %d, want the default %d", models[0].MaxInputTokens, fallbackModelContextWindow)
+	}
+}
+
+// TestModelPathMatchesTheWorkingEndpoint pins the path measured against the
+// live service: /console/... answers 500 on the international host while
+// /v2/... answers 401 on both, so the wrong path silently forced the fallback
+// catalogue.
+func TestModelPathMatchesTheWorkingEndpoint(t *testing.T) {
+	if workBuddyModelsPath != "/v2/enterprises/personal/models" {
+		t.Fatalf("models path = %q, want the endpoint both realms accept", workBuddyModelsPath)
+	}
+	if strings.Contains(workBuddyModelsPath, "/console/") {
+		t.Fatal("the /console/ form is the one that fails internationally")
+	}
+}
