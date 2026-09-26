@@ -236,6 +236,11 @@ type requestContext struct {
 	Label          string
 	Stream         bool
 	StartedAt      time.Time
+	// Variant is the supplier realm of the account that served this request
+	// ("cn" / "ai"). The call log needs it because Provider is a constant
+	// ("codebuddy") for both realms, so a mixed pool produced records that could
+	// not be told apart.
+	Variant string
 }
 
 var inflight = newInflightMap()

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -449,29 +450,62 @@ func TestMainPageVariantNoteExplainsScope(t *testing.T) {
 	}
 }
 
-// TestMainPageOffersTwoAuthEntries covers the requested panel buttons: one for
-// each supplier, so an account can be added for the side you are not scoped to.
-func TestMainPageOffersTwoAuthEntries(t *testing.T) {
+// TestMainPageHasOneSupplierSwitchAndDefersAuthToCPA pins the flow the user
+// asked for: the panel exposes a single supplier switch, and authorisation
+// happens in CPA's OAuth entry rather than through panel-minted links.
+//
+// The panel used to offer two buttons that called /workbuddy/auth/start. Those
+// produced sessions CPA never saw, so an account authorised from the panel was
+// not equivalent to one authorised from CPA — a second, divergent auth path.
+func TestMainPageHasOneSupplierSwitchAndDefersAuthToCPA(t *testing.T) {
 	resetState()
 	page := renderMainPage()
 
-	for _, needle := range []string{"国内版授权", "国际版授权"} {
-		if !strings.Contains(page, needle) {
-			t.Errorf("main page is missing the %s button", needle)
-		}
-	}
-	if !strings.Contains(page, "window.startAuth = function") {
-		t.Fatal("startAuth is referenced but never defined")
-	}
-	if !strings.Contains(page, "/auth/start") {
-		t.Fatal("the buttons do not call the auth-start endpoint")
-	}
-	// The heading must not promise a version, now that the concept is a supplier.
-	if strings.Contains(page, "版本切换") {
-		t.Fatal(`the panel still says 版本切换; it should say 供应商切换`)
-	}
+	// The switch is the only control.
 	if !strings.Contains(page, "供应商切换") {
 		t.Fatal("the panel is missing the 供应商切换 heading")
+	}
+	if strings.Contains(page, "版本切换") {
+		t.Fatal("the panel still says 版本切换")
+	}
+	// The three scopes must be offered.
+	for _, needle := range []string{"全部供应商", "国内供应商", "国际供应商"} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("the switch is missing the %s option", needle)
+		}
+	}
+
+	// The panel must not mint auth links of its own any more.
+	for _, gone := range []string{"国内版授权", "国际版授权", "startAuth", "/auth/start"} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the panel still contains the removed control %q", gone)
+		}
+	}
+
+	// And it must say where authorisation actually happens.
+	if !strings.Contains(page, "授权在 CPA 的 OAuth 登录中完成") {
+		t.Fatal("the panel does not point the operator at CPA's OAuth entry")
+	}
+	// Each scope must name its host, so the operator knows what to expect.
+	if !strings.Contains(page, "copilot.tencent.com") || !strings.Contains(page, "www.workbuddy.ai") {
+		t.Fatal("the panel does not name the host each scope will use")
+	}
+}
+
+// TestPanelAuthEndpointsAreGone guards the removed route: leaving it reachable
+// would keep a second auth path alive.
+func TestPanelAuthEndpointsAreGone(t *testing.T) {
+	for _, route := range managementRegistration().Routes {
+		if strings.Contains(route.Path, "/auth/start") {
+			t.Fatalf("the removed panel auth route is still registered: %s", route.Path)
+		}
+	}
+	if _, handled := handleMainRequest(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/workbuddy/auth/start",
+		Query:  url.Values{"variant": []string{"cn"}},
+	}); handled {
+		t.Fatal("the removed /auth/start path is still dispatched")
 	}
 }
 
@@ -645,10 +679,131 @@ func TestGrowthDiagnosticsAreBounded(t *testing.T) {
 	}
 }
 
+// ---- call log realm labelling --------------------------------------------
+
+// TestCallRecordCarriesTheSupplierRealm is the guard for the reported gap: the
+// call log showed only the provider key, which is the constant "codebuddy" for
+// both realms, so a mixed pool produced records that could not be told apart.
+func TestCallRecordCarriesTheSupplierRealm(t *testing.T) {
+	resetState()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	// One account per realm, each with its own domain so the realm resolves.
+	restore := stubHostCall(func(method string, _ any) (json.RawMessage, error) {
+		if method != "host.auth.list" {
+			return json.RawMessage(`{}`), nil
+		}
+		cn, _ := json.Marshal(map[string]any{"accessToken": "[REDACTED]", "uid": "u-cn", "domain": "copilot.tencent.com"})
+		ai, _ := json.Marshal(map[string]any{"accessToken": "[REDACTED]", "uid": "u-ai", "domain": "www.workbuddy.ai"})
+		return mustMarshal(t, map[string]any{
+			"files": []map[string]any{
+				{"auth_index": "codebuddy-u-cn.json", "provider": workBuddyProviderKey, "storage_json": json.RawMessage(cn)},
+				{"auth_index": "codebuddy-u-ai.json", "provider": workBuddyProviderKey, "storage_json": json.RawMessage(ai)},
+			},
+		}), nil
+	})
+	defer restore()
+	state.accounts.invalidate()
+
+	// The pool must learn each lane's realm.
+	for _, account := range listWorkBuddyAccounts() {
+		state.pool.observe(workBuddyProviderKey, account.UID, account.Label)
+	}
+	got := map[string]string{}
+	for _, lane := range state.pool.snapshot() {
+		got[lane.UID] = lane.Variant
+	}
+	if got["u-cn"] != "cn" {
+		t.Fatalf("domestic lane variant = %q, want cn", got["u-cn"])
+	}
+	if got["u-ai"] != "ai" {
+		t.Fatalf("international lane variant = %q, want ai", got["u-ai"])
+	}
+
+	// resolveAccountVariant must find the same answers from the log's inputs.
+	if v := resolveAccountVariant("u-cn", ""); v != "cn" {
+		t.Fatalf("resolveAccountVariant(u-cn) = %q, want cn", v)
+	}
+	if v := resolveAccountVariant("u-ai", ""); v != "ai" {
+		t.Fatalf("resolveAccountVariant(u-ai) = %q, want ai", v)
+	}
+	if v := resolveAccountVariant("nobody", ""); v != "" {
+		t.Fatalf("an unknown uid resolved to %q, want empty", v)
+	}
+}
+
+// TestVariantLabelOrDash pins the rendering, including the unknown case: an
+// empty cell would read as a rendering bug.
+func TestVariantLabelOrDash(t *testing.T) {
+	cases := map[string]string{"cn": "国内", "ai": "国际", "": "—", "weird": "—"}
+	for in, want := range cases {
+		if got := variantLabelOrDash(in); got != want {
+			t.Errorf("variantLabelOrDash(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestCallLogShowsRealmNotProviderKey covers the rendering: the realm column
+// must be present, and the provider key alone is no longer the label.
+func TestCallLogShowsRealmNotProviderKey(t *testing.T) {
+	resetState()
+	state.log.add(callRecord{
+		ProviderID: workBuddyProviderKey,
+		Variant:    "ai",
+		UID:        "u-ai",
+		Label:      "国际账号",
+		Model:      "codebuddy/glm-5.2",
+		StatusCode: 200,
+		StartedAt:  time.Now(),
+	})
+	state.log.add(callRecord{
+		ProviderID: workBuddyProviderKey,
+		Variant:    "cn",
+		UID:        "u-cn",
+		Label:      "国内账号",
+		Model:      "codebuddy/deepseek-v4-flash",
+		StatusCode: 200,
+		StartedAt:  time.Now(),
+	})
+
+	page := renderMainPage()
+	if !strings.Contains(page, "国内") || !strings.Contains(page, "国际") {
+		t.Fatal("the call log does not distinguish the two realms")
+	}
+	// Both rows share the provider key; the realm must be what separates them.
+	if !strings.Contains(page, "国际账号") || !strings.Contains(page, "国内账号") {
+		t.Fatal("the call log does not show which account served each call")
+	}
+}
+
+// TestObserveDoesNotDeadlock guards the lock discipline: resolving the realm
+// walks the account store, which reads the pool back, so it must not run while
+// the pool lock is held.
+func TestObserveDoesNotDeadlock(t *testing.T) {
+	resetState()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			state.pool.observe(workBuddyProviderKey, "u-race", "acct")
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("observe deadlocked while resolving the realm")
+	}
+}
+
 // ---- model qualification -------------------------------------------------
 
-// TestModelIDsCarryTheProviderPrefix is the guard for the reported collision:
-// the list showed a bare "deepseek-v4.1-flash" alongside another plugin's
+// TestModelIDsCarryTheProviderPrefix is the guard for the reported collision:// the list showed a bare "deepseek-v4.1-flash" alongside another plugin's
 // "DeepSeek-V4-Flash", with nothing telling the client which upstream it meant.
 func TestModelIDsCarryTheProviderPrefix(t *testing.T) {
 	models := modelsToInfo([]workBuddyModel{

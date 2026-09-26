@@ -58,6 +58,7 @@ func interceptResponse(request []byte) ([]byte, error) {
 		}
 		state.log.add(callRecord{
 			ProviderID:     ctx.Provider,
+			Variant:        ctx.Variant,
 			UID:            ctx.UID,
 			Label:          ctx.Label,
 			Model:          ctx.Model,
@@ -77,6 +78,7 @@ func interceptResponse(request []byte) ([]byte, error) {
 	}
 	rec := callRecord{
 		ProviderID:     ctx.Provider,
+		Variant:        ctx.Variant,
 		UID:            ctx.UID,
 		Label:          ctx.Label,
 		Model:          ctx.Model,
@@ -144,6 +146,46 @@ func upstreamErrText(upErr upstreamError) string {
 	return upErr.Message
 }
 
+// resolveAccountVariant reports which supplier realm served a request.
+//
+// The call log previously showed only Provider, which is the constant
+// "codebuddy" for both realms, so with a mixed pool there was no way to tell a
+// domestic call from an international one.
+//
+// Lookup order is cheapest-first and every step is best-effort: a log field is
+// not worth failing a request over, and an unresolved realm is reported as "—"
+// rather than guessed.
+func resolveAccountVariant(uid, label string) string {
+	if uid == "" && label == "" {
+		return ""
+	}
+	// 1. The pool knows a lane's realm once it has been observed.
+	for _, lane := range state.pool.snapshot() {
+		if lane.Variant == "" {
+			continue
+		}
+		if (uid != "" && (lane.UID == uid || laneKey(lane.Provider, lane.UID) == uid)) ||
+			(label != "" && lane.Label == label) {
+			return lane.Variant
+		}
+	}
+	// 2. Fall back to the account store, which derives the realm from the
+	//    credential itself (domain, then JWT issuer).
+	return variantForUID(uid, label)
+}
+
+// variantLabelOrDash renders a realm for display, using an em dash when unknown
+// so the column never shows an empty cell that reads as a rendering bug.
+func variantLabelOrDash(variant string) string {
+	switch variant {
+	case string(variantAi):
+		return "国际"
+	case string(variantCn):
+		return "国内"
+	}
+	return "—"
+}
+
 // resolveContext rebuilds the per-request context from the WorkBuddy headers the
 // request interceptor stamped, falling back to whatever CPA supplied.
 func resolveContext(requestID string, headers http.Header, model, requestedModel string, stream bool) requestContext {
@@ -171,6 +213,10 @@ func resolveContext(requestID string, headers http.Header, model, requestedModel
 	if label := headerValue(headers, "X-WorkBuddy-Auth-Label"); label != "" {
 		ctx.Label = label
 	}
+	// The realm is a property of the credential, not of the request. Resolving it
+	// here means a log line says which supplier answered even though Provider is
+	// the same constant for both.
+	ctx.Variant = resolveAccountVariant(ctx.UID, ctx.Label)
 
 	// The explicit "provider/model" form is a second, header-independent source
 	// of truth (V1/o.k step 6).

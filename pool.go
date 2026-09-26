@@ -294,7 +294,6 @@ func (p *credentialPool) observe(provider, uid, label string) *credentialLane {
 	}
 	key := laneKey(provider, uid)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	lane, ok := p.lanes[key]
 	if !ok {
 		// A new lane starts enabled with no known credits, matching W1.d's
@@ -306,7 +305,37 @@ func (p *credentialPool) observe(provider, uid, label string) *credentialLane {
 	if label != "" {
 		lane.Label = label
 	}
+	needVariant := lane.Variant == ""
+	p.mu.Unlock()
+
+	// Resolve the realm without the lock held: the lookup walks the account
+	// store, which reads the pool back through the account view, so calling it
+	// under p.mu deadlocks.
+	if needVariant {
+		if variant := variantForUID(uid, label); variant != "" {
+			p.mu.Lock()
+			if lane.Variant == "" {
+				lane.Variant = variant
+			}
+			p.mu.Unlock()
+		}
+	}
 	return lane
+}
+
+// variantForUID resolves a realm from the account store, without touching the
+// pool (so it is safe to call while holding the pool lock).
+func variantForUID(uid, label string) string {
+	for _, account := range listWorkBuddyAccounts() {
+		if account.Variant == "" {
+			continue
+		}
+		if (uid != "" && (account.UID == uid || account.AuthIndex == uid)) ||
+			(label != "" && account.Label == label) {
+			return account.Variant
+		}
+	}
+	return ""
 }
 
 // setCredits records a quota reading, mirroring A0/s.java:947:

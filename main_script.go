@@ -260,55 +260,6 @@ func mainPageScript() string {
     });
   };
 
-  // startAuth requests a supplier-scoped login link and shows it.
-  //
-  // CPA's OAuth entry follows the 供应商切换 setting, so this exists for the
-  // other case: adding an account for a supplier you are not currently scoped
-  // to. The link is opened for the operator and also printed, because popup
-  // blockers make window.open unreliable.
-  window.startAuth = function (variant) {
-    var msg = document.getElementById('authMsg');
-    var box = document.getElementById('authLinkBox');
-    var label = variant === 'ai' ? '国际供应商' : '国内供应商';
-    if (msg) { msg.textContent = '正在获取' + label + '授权链接…'; msg.className = 'small muted'; }
-    if (box) { box.innerHTML = ''; }
-    call(BASE + '/auth/start?variant=' + encodeURIComponent(variant), { method: 'GET' })
-      .then(function (payload) {
-        if (!payload.ok) {
-          if (msg) { msg.textContent = '获取失败：' + (payload.error || '未知原因'); msg.className = 'small bad'; }
-          return;
-        }
-        if (msg) {
-          msg.textContent = label + '授权链接已生成（对应 ' + (payload.auth_host || '') + '），请在浏览器中打开并完成登录；登录后会出现在账号列表中。';
-          msg.className = 'small ok';
-        }
-        if (box) {
-          box.innerHTML = '<div class="note" style="word-break:break-all">' +
-            '<a href="' + escapeHTML(payload.url) + '" target="_blank" rel="noopener">' +
-            escapeHTML(payload.url) + '</a></div>' +
-            '<div class="row"><button type="button" class="ghost" onclick="copyText(' +
-            JSON.stringify(payload.url) + ')">复制链接</button>' +
-            '<a class="button ghost" href="' + escapeHTML(payload.url) + '" target="_blank" rel="noopener">打开链接</a></div>' +
-            '<div class="note">' + escapeHTML(payload.hint || '') + '</div>';
-        }
-      })
-      .catch(function (e) {
-        if (msg) { msg.textContent = '获取失败：' + e.message; msg.className = 'small bad'; }
-      });
-  };
-
-  // copyText copies a value, falling back to a prompt when the clipboard API is
-  // unavailable (it needs a secure context).
-  window.copyText = function (text) {
-    var msg = document.getElementById('authMsg');
-    try {
-      navigator.clipboard.writeText(text).then(function () {
-        if (msg) { msg.textContent = '链接已复制到剪贴板'; msg.className = 'small ok'; }
-      }).catch(function () { window.prompt('复制下面的链接：', text); });
-    } catch (e) {
-      window.prompt('复制下面的链接：', text);
-    }
-  };
 
   // ---- account toggle --------------------------------------------------
   // toggleAccount enables or disables one account.

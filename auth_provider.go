@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"strings"
 	"time"
 
@@ -277,65 +276,6 @@ func beginWorkBuddyLogin(variant wbVariant) (workBuddyLoginStart, error) {
 		ExpiresAt: expiresAt,
 		Variant:   variant,
 	}, nil
-}
-
-// panelAuthStart answers GET /workbuddy/auth/start?variant=cn|ai.
-//
-// CPA exposes exactly one OAuth entry per plugin (AuthProvider.Identifier
-// returns a single string), and that entry already follows the 供应商切换
-// setting: authVariantResolve() maps 国内版/国际版 to the matching login host.
-//
-// This endpoint covers the remaining case — adding an account for the *other*
-// supplier without changing the global setting. It returns that realm's login
-// link, and the state is registered so the normal poll completes it.
-func panelAuthStart(req pluginapi.ManagementRequest) (managementResponse, bool) {
-	method := strings.ToUpper(strings.TrimSpace(req.Method))
-	if method != http.MethodGet && method != http.MethodPost {
-		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
-	}
-
-	wanted := strings.TrimSpace(req.Query.Get("variant"))
-	variant, ok := parseVariant(wanted)
-	if !ok {
-		// Without an explicit realm the call would be indistinguishable from the
-		// OAuth entry itself, which already honours the setting.
-		return managementResponse{
-			StatusCode: http.StatusBadRequest,
-			Headers:    jsonResponseHeaders(),
-			Body: mustJSON(map[string]any{
-				"ok":    false,
-				"error": "请指定 variant=cn 或 variant=ai",
-			}),
-		}, true
-	}
-
-	started, errStart := beginWorkBuddyLogin(variant)
-	if errStart != nil {
-		return managementResponse{
-			StatusCode: http.StatusBadGateway,
-			Headers:    jsonResponseHeaders(),
-			Body: mustJSON(map[string]any{
-				"ok":    false,
-				"error": errStart.Error(),
-			}),
-		}, true
-	}
-
-	return managementResponse{
-		StatusCode: http.StatusOK,
-		Headers:    jsonResponseHeaders(),
-		Body: mustJSON(map[string]any{
-			"ok":            true,
-			"variant":       string(variant),
-			"variant_label": variant.label(),
-			"auth_host":     authHostFor(variant),
-			"url":           started.URL,
-			"state":         started.State,
-			"expires_at":    started.ExpiresAt,
-			"hint": "在浏览器打开该链接，使用" + variant.label() + "账号登录。" +
-				"登录完成后回到 CPA 的授权页，或在本面板点击「刷新账号」查看结果。",
-		}),
-	}, true
 }
 
 // authVariantHint reads the realm hint from a login-start request.

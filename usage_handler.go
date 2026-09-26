@@ -63,7 +63,10 @@ func handleUsage(request []byte) ([]byte, error) {
 	}
 
 	state.log.add(callRecord{
-		ProviderID:       provider,
+		ProviderID: provider,
+		// Same reason as the intercept path: the realm has to be resolved from
+		// the credential, because provider is a constant for both realms.
+		Variant:          resolveAccountVariant(uid, ""),
 		UID:              uid,
 		Model:            model,
 		RequestedModel:   model,

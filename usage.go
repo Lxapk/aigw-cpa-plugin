@@ -13,7 +13,11 @@ import (
 //	kind(f2.b), statusCode, promptTokens, completionTokens, totalTokens,
 //	latencyMillis, errorText, responsePreview(<=8192), requestPreview(<=8192)
 type callRecord struct {
-	ProviderID       string    `json:"provider_id"`
+	ProviderID string `json:"provider_id"`
+	// Variant is the supplier realm that served the call ("cn" / "ai").
+	// ProviderID alone cannot distinguish them: it is the constant "codebuddy"
+	// for both realms.
+	Variant          string    `json:"variant,omitempty"`
 	UID              string    `json:"uid"`
 	Label            string    `json:"label"`
 	Model            string    `json:"model"`

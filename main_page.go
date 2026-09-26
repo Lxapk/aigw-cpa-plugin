@@ -357,14 +357,24 @@ func renderMainPage() string {
 	if len(recentCalls) == 0 {
 		b.WriteString(`<div class="empty">暂无调用记录。</div>`)
 	} else {
-		b.WriteString(`<table><thead><tr><th>时间</th><th>供应商</th><th>模型</th><th class="num">状态</th><th class="num">Tokens</th></tr></thead><tbody>`)
+		b.WriteString(`<table><thead><tr><th>时间</th><th>供应商</th><th>账号</th><th>模型</th><th class="num">状态</th><th class="num">Tokens</th></tr></thead><tbody>`)
 		for _, rec := range recentCalls {
 			cls := "ok"
 			if rec.StatusCode >= 400 || rec.Error != "" {
 				cls = "bad"
 			}
 			b.WriteString(`<tr><td class="mono">` + rec.StartedAt.Local().Format("15:04:05") + `</td>`)
-			b.WriteString(`<td>` + html.EscapeString(rec.ProviderID) + `</td>`)
+			// The realm, not the provider key: both realms share "codebuddy",
+			// so that column alone could not tell them apart.
+			pillClass := "idle"
+			switch rec.Variant {
+			case "ai":
+				pillClass = "warn"
+			case "cn":
+				pillClass = "ok"
+			}
+			b.WriteString(`<td><span class="pill ` + pillClass + `">` + html.EscapeString(variantLabelOrDash(rec.Variant)) + `</span></td>`)
+			b.WriteString(`<td class="mono small">` + html.EscapeString(firstNonEmpty(rec.Label, rec.UID, "—")) + `</td>`)
 			b.WriteString(`<td><code>` + html.EscapeString(rec.Model) + `</code></td>`)
 			b.WriteString(`<td class="num ` + cls + `">` + fmt.Sprint(rec.StatusCode) + `</td>`)
 			b.WriteString(`<td class="num">` + fmt.Sprint(rec.PromptTokens) + " / " + fmt.Sprint(rec.CompletionTokens) + `</td></tr>`)
@@ -402,20 +412,18 @@ func renderMainPage() string {
 	b.WriteString(`<div class="note">国际供应商没有签到接口，也没有成长任务中心；这些功能只在选用国内账号时执行。</div>`)
 	b.WriteString(`<div class="muted small" id="variantMsg"></div>`)
 
-	// Two explicit authorisation entries.
+	// One switch decides the supplier; authorisation itself happens in CPA.
 	//
-	// CPA shows one OAuth entry per plugin and that entry already follows the
-	// selector above. These buttons exist for the mixed case: adding an account
-	// for the supplier you are not currently scoped to, without having to flip
-	// the setting back and forth.
-	b.WriteString(`<h3 style="margin:1rem 0 .35rem;font-size:.95rem">新增授权</h3>`)
-	b.WriteString(`<div class="note">CPA 的授权入口会按上面的"供应商切换"决定走哪一侧。` +
-		`下面两个按钮用于<strong>单独为某一侧新增账号</strong>，不影响当前设置。</div>`)
-	b.WriteString(`<div class="row">`)
-	b.WriteString(`<button type="button" onclick="startAuth('cn')">国内版授权</button>`)
-	b.WriteString(`<button type="button" onclick="startAuth('ai')">国际版授权</button>`)
-	b.WriteString(`</div>`)
-	b.WriteString(`<div class="muted small" id="authMsg"></div>`)
+	// The panel used to offer two buttons that minted links of its own. That
+	// duplicated CPA's OAuth flow and produced sessions CPA never saw, so an
+	// account authorised here was not the same as one authorised there. The
+	// switch below is all that is needed: CPA's single OAuth entry reads it and
+	// sends the user to the matching host.
+	b.WriteString(`<div class="note" style="margin-top:.8rem">授权在 CPA 的 OAuth 登录中完成：` +
+		`上面的选择决定该入口走<strong>国内</strong>还是<strong>国际</strong>供应商。` +
+		`选「国内供应商」时点 CPA 的授权入口会打开 <code>copilot.tencent.com</code>，` +
+		`选「国际供应商」时打开 <code>www.workbuddy.ai</code>；选「全部供应商」时默认走国内。` +
+		`需要两个供应商的账号时，切换后各授权一次即可。</div>`)
 	b.WriteString(`<div id="authLinkBox"></div>`)
 	b.WriteString(`</div>`)
 
@@ -494,9 +502,6 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 
 	case "/variant":
 		return handleVariantRequest(req)
-
-	case "/auth/start":
-		return panelAuthStart(req)
 
 	case "/account/toggle":
 		return handleAccountToggleRequest(req)
