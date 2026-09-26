@@ -49,6 +49,9 @@ type taskSpec struct {
 var defaultTasks = []taskSpec{
 	{Kind: taskKindCheckin, Label: "每日签到", Interval: 24 * time.Hour},
 	{Kind: taskKindQuota, Label: "刷新积分", Interval: 30 * time.Minute},
+	// The growth centre resets daily; running it once a day is what the
+	// reference implementation's scheduler does.
+	{Kind: taskKindActivity, Label: "成长任务", Interval: 24 * time.Hour},
 }
 
 // ---- per-account task state ---------------------------------------------
@@ -62,6 +65,8 @@ type accountTasks struct {
 	Enabled bool          `json:"enabled"`
 	Checkin *taskRunState `json:"checkin,omitempty"`
 	Quota   *taskRunState `json:"quota,omitempty"`
+	// Activity tracks the growth-task pass.
+	Activity *taskRunState `json:"activity,omitempty"`
 }
 
 type taskRunState struct {
@@ -91,6 +96,8 @@ func (a *accountTasks) runState(kind taskKind) *taskRunState {
 		return a.Checkin
 	case taskKindQuota:
 		return a.Quota
+	case taskKindActivity:
+		return a.Activity
 	}
 	return nil
 }
@@ -101,6 +108,8 @@ func (a *accountTasks) setRunState(kind taskKind, st *taskRunState) {
 		a.Checkin = st
 	case taskKindQuota:
 		a.Quota = st
+	case taskKindActivity:
+		a.Activity = st
 	}
 }
 
@@ -190,6 +199,8 @@ func (e *taskEngine) execute(ctx context.Context, req taskRequest) {
 			e.runCheckin(ctx, req.UID)
 		case taskKindQuota:
 			e.runQuota(ctx, req.UID)
+		case taskKindActivity:
+			e.runActivity(ctx, req.UID)
 		default:
 			e.record(req.UID, kind, false, fmt.Sprintf("unknown task: %s", kind))
 		}
@@ -221,6 +232,30 @@ func (e *taskEngine) runQuota(_ context.Context, uid string) {
 	res := fetchQuotaOne(account)
 	msg := firstNonEmpty(res.Message, res.Error, "积分已刷新")
 	e.record(uid, taskKindQuota, res.Error == "", msg)
+}
+
+// runActivity performs one growth-task pass for an account.
+//
+// The growth pass chains several upstream calls, so it gets its own timeout
+// rather than inheriting an unbounded context from the ticker: a stuck endpoint
+// must not hold the task engine's single run slot forever.
+func (e *taskEngine) runActivity(parent context.Context, uid string) {
+	account, ok := e.resolveAccount(uid)
+	if !ok {
+		e.record(uid, taskKindActivity, false, "账号不存在或已禁用")
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, growthRunTimeout)
+	defer cancel()
+
+	result := runGrowthPass(ctx, account)
+	summary := fmt.Sprintf("成长任务：领奖 %d 个 / 点亮 %d 个 / 跳过 %d 个 / 失败 %d 个，+%d 积分",
+		result.Claimed, result.Lit, result.Skipped, result.Failed, result.Earned)
+	if result.Error != "" {
+		summary = "成长任务失败：" + result.Error
+	}
+	e.record(uid, taskKindActivity, result.OK && result.Error == "", summary)
+	recordGrowthResult(uid, result)
 }
 
 // resolveAccount maps a task uid onto a real check-in credential, refusing

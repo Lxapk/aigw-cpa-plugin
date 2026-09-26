@@ -34,9 +34,16 @@ func renderTaskPage() string {
 
 	b.WriteString(`<div class="card"><div class="row">`)
 	b.WriteString(`<button type="button" id="btnRunAllTasks" onclick="runAllTasks()">全部执行</button>`)
+	b.WriteString(`<button type="button" class="ghost" id="btnRunGrowth" onclick="runGrowthTasks()">完成成长任务</button>`)
+	b.WriteString(`<button type="button" class="ghost" id="btnTravel" onclick="runTravel()">猫猫旅行</button>`)
 	b.WriteString(`<span class="muted small" id="taskMsg"></span>`)
-	b.WriteString(`</div></div>`)
+	b.WriteString(`</div>`)
+	b.WriteString(`<div class="note">「完成成长任务」会自动接取、点亮并领取每日成长任务奖励，顺带检查猫猫旅行。` +
+		`需要真实桌面操作的任务（如资料库、发现应用）无法代做，会列出深链提示；国际版账号不在成长任务中心范围内，会自动跳过。</div>`)
+	b.WriteString(`</div>`)
 	b.WriteString(`<div id="taskResult"></div>`)
+
+	b.WriteString(renderGrowthSection())
 
 	b.WriteString(`<div class="card"><h2>账号任务状态</h2>`)
 	if len(accounts) == 0 {
@@ -514,6 +521,12 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 
 	case "/account/toggle":
 		return handleAccountToggleRequest(req)
+
+	case "/growth/tasks":
+		return handleGrowthTasksRequest(req), true
+
+	case "/growth/summary":
+		return handleGrowthTasksRequest(req), true
 	}
 
 	if method == http.MethodPost {
@@ -559,6 +572,16 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 
 		case "/run":
 			// Combined action: check in, then refresh credits.
+			//
+			// The growth pass is opt-in ("growth": true) because it is far slower
+			// than the other two stages: a bare /run keeps the quick behaviour
+			// the existing buttons rely on.
+			var runBody struct {
+				Growth bool `json:"growth"`
+			}
+			if len(req.Body) > 0 {
+				_ = json.Unmarshal(req.Body, &runBody)
+			}
 			run := runFromManagement()
 			results, errQuota := runQuotaRefresh("manual")
 			refreshAccountsAfterLogin()
@@ -568,11 +591,20 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 			} else {
 				payload["quota_error"] = errQuota.Error()
 			}
+			if runBody.Growth {
+				payload["growth"] = runGrowthForAll()
+			}
 			return managementResponse{
 				StatusCode: http.StatusOK,
 				Headers:    jsonResponseHeaders(),
 				Body:       mustJSON(payload),
 			}, true
+
+		case "/growth/run":
+			return handleGrowthRunRequest(req), true
+
+		case "/growth/travel":
+			return handleGrowthTravelRequest(req), true
 		}
 	}
 

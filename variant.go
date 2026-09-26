@@ -178,6 +178,17 @@ func (v wbVariant) hasCheckin() bool {
 	return v != variantAi
 }
 
+// hasGrowthCenter reports whether this variant exposes the domestic growth task
+// centre.
+//
+// The centre only exists for the domestic realm: the reference implementation
+// short-circuits run_growth_tasks with "国际版不适用国内成长任务中心" before
+// making a single call. The check-in and quota features do work internationally,
+// so this is a separate capability rather than a synonym for hasCheckin.
+func (v wbVariant) hasGrowthCenter() bool {
+	return v != variantAi
+}
+
 // apiBase is the WorkBuddy API host for this variant.
 //
 //	variant.rs: Self::Cn => WORKBUDDY_API_ENDPOINT ("https://www.codebuddy.cn")

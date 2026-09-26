@@ -147,6 +147,7 @@ type globalState struct {
 	accounts   *accountStore
 	scheduler  *schedulerState
 	taskEngine *taskEngine
+	growth     *growthStore
 }
 
 var state = &globalState{
@@ -158,6 +159,7 @@ var state = &globalState{
 	accounts:   newAccountStore(),
 	scheduler:  newSchedulerState(),
 	taskEngine: newTaskEngine(),
+	growth:     newGrowthStore(),
 }
 
 func shutdownPlugin() {

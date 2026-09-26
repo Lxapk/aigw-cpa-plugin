@@ -168,6 +168,14 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .bad { color: var(--danger); }
 .note { margin: 8px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.55; }
 .empty { padding: 18px 4px; color: var(--muted); font-size: .84rem; }
+/* ---------- run log ---------- */
+pre.log {
+  margin: 8px 0 0; padding: 11px 13px; max-height: 340px; overflow: auto;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .76rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+details > summary { cursor: pointer; margin-top: 8px; }
 /* ---------- panels/radio groups ---------- */
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--panel-2); }
 .seg button { border-radius: 0; background: transparent; color: var(--text); font-weight: 620; padding: 7px 13px; }

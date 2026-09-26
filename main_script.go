@@ -369,6 +369,144 @@ func mainPageScript() string {
     autoRefreshTimer = setInterval(pollAccounts, AUTO_REFRESH_MS);
   }
 
+  // ---- growth tasks ----------------------------------------------------
+  //
+  // The growth pass is slower than the other tabs' actions (it spaces upstream
+  // calls by a second), so the buttons report progress and stay disabled until
+  // the response arrives.
+  function growthButton(id, busy, label) {
+    var btn = document.getElementById(id);
+    if (!btn) return;
+    btn.disabled = busy;
+    if (label) btn.textContent = label;
+  }
+
+  window.runGrowthTasks = function () {
+    growthButton('btnRunGrowth', true, '执行中…');
+    msgSet('taskMsg', '正在接取、点亮并领取成长任务（可能需要一两分钟）…', 'muted');
+
+    call(BASE + '/growth/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: 'all' })
+    }).then(function (payload) {
+      if (payload.ok === false) {
+        msgSet('taskMsg', '执行失败：' + (payload.error || '未知原因'), 'bad');
+        return;
+      }
+      var lines = payload.logs || [];
+      var earned = payload.earned_credit || 0;
+      msgSet('taskMsg', '完成：' + (payload.accounts_count || 0) + ' 个账号，累计 +' + earned + ' 积分', 'ok');
+      var box = document.getElementById('taskResult');
+      if (box) {
+        var html = '<div class="card"><h2>成长任务结果 <span class="hint">+' + earned + ' 积分</span></h2><pre class="log">';
+        for (var i = 0; i < lines.length; i++) {
+          html += escapeHTML(lines[i].message) + '\n';
+        }
+        html += '</pre></div>';
+        box.innerHTML = html;
+      }
+      setTimeout(function () { location.reload(); }, 2500);
+    }).catch(function (e) {
+      msgSet('taskMsg', '执行失败：' + e.message, 'bad');
+    }).then(function () {
+      growthButton('btnRunGrowth', false, '完成成长任务');
+    });
+  };
+
+  window.runTravel = function () {
+    growthButton('btnTravel', true, '执行中…');
+    msgSet('taskMsg', '正在检查猫猫旅行…', 'muted');
+
+    call(BASE + '/growth/travel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: 'all' })
+    }).then(function (payload) {
+      if (payload.ok === false) {
+        msgSet('taskMsg', '执行失败：' + (payload.error || '未知原因'), 'bad');
+        return;
+      }
+      var results = payload.results || [];
+      var parts = [];
+      for (var i = 0; i < results.length; i++) {
+        parts.push(results[i].label + ': ' + (results[i].message || results[i].error || ''));
+      }
+      msgSet('taskMsg', parts.join('；') || '没有可执行的账号', parts.length ? 'ok' : 'muted');
+    }).catch(function (e) {
+      msgSet('taskMsg', '执行失败：' + e.message, 'bad');
+    }).then(function () {
+      growthButton('btnTravel', false, '猫猫旅行');
+    });
+  };
+
+  // loadGrowthTasks renders the per-task detail for the first eligible account.
+  window.loadGrowthTasks = function () {
+    msgSet('growthMsg', '查询中…', 'muted');
+    var box = document.getElementById('growthDetail');
+    if (box) box.innerHTML = '';
+
+    call(BASE + '/growth/tasks').then(function (runs) {
+      var list = runs.runs || [];
+      if (!list.length) {
+        msgSet('growthMsg', '还没有运行记录，先执行一次成长任务', 'muted');
+        return;
+      }
+      // The stored results carry the uid to query.
+      return loadGrowthDetailFor(list[0].uid, list[0].label);
+    }).catch(function (e) {
+      msgSet('growthMsg', '查询失败：' + e.message, 'bad');
+    });
+  };
+
+  function loadGrowthDetailFor(uid, label) {
+    return call(BASE + '/growth/tasks?uid=' + encodeURIComponent(uid)).then(function (payload) {
+      var box = document.getElementById('growthDetail');
+      if (payload.ok === false) {
+        msgSet('growthMsg', '查询失败：' + (payload.error || '未知原因'), 'bad');
+        return;
+      }
+      var tasks = payload.tasks || [];
+      var s = payload.summary || {};
+      var travel = s.travel || {};
+      msgSet('growthMsg', '账号 ' + (payload.label || label) + '：能量 ' + (s.energy || 0) +
+        '，连续打卡 ' + (s.streak_days || 0) + ' 天，猫猫 ' + (travel.state || '未知'), 'ok');
+
+      if (box) {
+        var html = '<table><thead><tr><th>任务</th><th class="num">进度</th><th class="num">奖励</th><th>状态</th></tr></thead><tbody>';
+        for (var i = 0; i < tasks.length; i++) {
+          var t = tasks[i];
+          var statusText = t.status || '';
+          if (t.unforgeable) statusText = '无法代做';
+          else if (t.desktop_only) statusText = '需桌面操作';
+          else if (statusText === 'claimed') statusText = '已领奖';
+          else if (statusText === 'completed') statusText = '已完成';
+          else if (statusText === 'not_accepted') statusText = '未接取';
+          else if (statusText === 'accepted') statusText = '进行中';
+
+          var note = '';
+          if (t.skip_reason) note = ' <span class="muted small">' + escapeHTML(t.skip_reason) + '</span>';
+          if (t.jump_url) note += ' <span class="muted small">' + escapeHTML(t.jump_url) + '</span>';
+
+          html += '<tr><td><strong>' + escapeHTML(t.name || t.task_code) + '</strong>' + note + '</td>' +
+            '<td class="num">' + (t.current || 0) + '/' + (t.target || 1) + '</td>' +
+            '<td class="num">+' + (t.reward_credit || 0) + '</td>' +
+            '<td>' + escapeHTML(statusText) + '</td></tr>';
+        }
+        html += '</tbody></table>';
+        box.innerHTML = html;
+      }
+    });
+  }
+
+  // escapeHTML mirrors the server-side html.EscapeString for values that arrive
+  // as JSON and are interpolated into markup.
+  function escapeHTML(v) {
+    return String(v == null ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     refreshKeyState();
     restoreTab();
