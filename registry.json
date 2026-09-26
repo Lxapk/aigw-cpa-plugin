@@ -16,7 +16,7 @@
             "goos": "linux",
             "goarch": "amd64",
             "url": "https://github.com/Lxapk/workbuddy-cpa-plugin/releases/download/v0.13.11/workbuddy_0.13.11_linux_amd64.zip",
-            "sha256": "dd622f133fbafc9446fc4c912335be3a815ebf69b40019e91964bd3d8d0ffb83"
+            "sha256": "5e9417ee66e1b1491f2078977ccc25d45657e5e4a0cf1a92de37d4b2610782d8"
           }
         ]
       }
