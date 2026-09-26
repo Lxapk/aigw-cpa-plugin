@@ -127,11 +127,19 @@ func defaultGatewaySettings() gatewaySettings {
 		ErrorThreshold:      3,
 		ErrorCooldownMillis: 600_000,
 		LogRetentionDays:    30,
-		DefaultProvider:     "trae",
-		Checkin:             defaultCheckinSettings(),
-		Quota:               defaultQuotaSettings(),
-		Routing:             defaultRoutingSettings(),
-		VariantOverride:     "",
+		// DefaultProvider is the provider used when a model name carries no
+		// explicit prefix. It defaults to this plugin's own key rather than the
+		// value the source app shipped ("trae"): the source app was a general
+		// gateway hosting several providers, while this plugin only serves
+		// WorkBuddy. Leaving "trae" here meant that turning on
+		// enforce_default_provider rejected every codebuddy/... request with
+		// "该网关仅允许使用默认供应商：trae" — the plugin refusing its own models.
+		DefaultProvider:        workBuddyProviderKey,
+		EnforceDefaultProvider: false,
+		Checkin:                defaultCheckinSettings(),
+		Quota:                  defaultQuotaSettings(),
+		Routing:                defaultRoutingSettings(),
+		VariantOverride:        "",
 	}
 }
 

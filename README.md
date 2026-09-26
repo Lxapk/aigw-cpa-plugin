@@ -1,4 +1,4 @@
-# aigw-reverse-proxy — CLIProxyAPI 反向代理插件
+# workbuddy — CLIProxyAPI 反向代理插件
 
 从 Android 应用 **「AI 聚合网关」v0.1.18**（`dev.aigw.app`）中提取其**反向代理网关**实现，移植为
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) v7 的**原生动态插件**（`.so`）。
@@ -218,7 +218,7 @@ for (d in accounts) {
 ```yaml
 plugins:
   configs:
-    aigw-reverse-proxy:
+    workbuddy:
       quota:
         enabled: true              # 打开定时刷新
         interval_minutes: 30       # 每 30 分钟
@@ -229,7 +229,7 @@ HTTP 接口：
 
 ```bash
 KEY="你的 management key"; BASE="http://127.0.0.1:8317"
-P="aigw-reverse-proxy"
+P="workbuddy"
 
 curl -s "$BASE/v0/management/$P/quota/status"  -H "Authorization: Bearer $KEY"
 curl -s -X POST "$BASE/v0/management/$P/quota/refresh" -H "Authorization: Bearer $KEY"
@@ -328,7 +328,7 @@ HTTP 2xx:
 ```yaml
 plugins:
   configs:
-    aigw-reverse-proxy:
+    workbuddy:
       # ... 其它配置 ...
       checkin:
         enabled: true          # 打开自动签到
@@ -350,13 +350,13 @@ plugins:
 
 ```bash
 # 查看配置与历史
-curl -s http://127.0.0.1:8317/v0/management/aigw-reverse-proxy/checkin/status
+curl -s http://127.0.0.1:8317/v0/management/workbuddy/checkin/status
 
 # 触发一次手动签到
-curl -s -X POST http://127.0.0.1:8317/v0/management/aigw-reverse-proxy/checkin/run
+curl -s -X POST http://127.0.0.1:8317/v0/management/workbuddy/checkin/run
 
 # 修改自动签到配置
-curl -s -X POST http://127.0.0.1:8317/v0/management/aigw-reverse-proxy/checkin/config \
+curl -s -X POST http://127.0.0.1:8317/v0/management/workbuddy/checkin/config \
   -H 'Content-Type: application/json' \
   -d '{"enabled":true,"hour":9,"minute":0,"on_start":true}'
 ```
@@ -391,10 +391,10 @@ CPA 的管理端点要求请求头带密钥，而页面是从 resource 路由加
 KEY="你的 remote-management.secret-key"
 BASE="http://127.0.0.1:8317"
 
-curl -s -X POST "$BASE/v0/management/aigw-reverse-proxy/checkin/run" \
+curl -s -X POST "$BASE/v0/management/workbuddy/checkin/run" \
   -H "Authorization: Bearer $KEY" | python3 -m json.tool
 
-curl -s "$BASE/v0/management/aigw-reverse-proxy/checkin/status" \
+curl -s "$BASE/v0/management/workbuddy/checkin/status" \
   -H "Authorization: Bearer $KEY" | python3 -m json.tool
 ```
 
@@ -563,7 +563,7 @@ CPA 需要知道"哪个请求该交给本插件的 executor"。**不认领会直
 ```yaml
 plugins:
   configs:
-    aigw-reverse-proxy:
+    workbuddy:
       default_model: "auto"    # 空或 auto 时用这个；留空则用目录里第一个
 ```
 
@@ -735,14 +735,14 @@ auth 文件名以 "codebuddy-" / "codebuddy_" 开头        → 收录
 对应的 HTTP 接口：
 
 ```bash
-curl -s -X POST "$BASE/v0/management/aigw-reverse-proxy/run" \
+curl -s -X POST "$BASE/v0/management/workbuddy/run" \
   -H "Authorization: Bearer $KEY"
 ```
 
 ### 账号列表 JSON
 
 ```bash
-curl -s "$BASE/v0/management/aigw-reverse-proxy/accounts" \
+curl -s "$BASE/v0/management/workbuddy/accounts" \
   -H "Authorization: Bearer $KEY"
 ```
 
@@ -836,7 +836,7 @@ if provider 信息为空，但候选都是我们的     → 接管
 ```yaml
 plugins:
   configs:
-    aigw-reverse-proxy:
+    workbuddy:
       routing:
         strategy: by_credits    # by_credits | round_robin | random
 ```
@@ -846,7 +846,7 @@ plugins:
 ### HTTP 接口
 
 ```bash
-KEY="你的 management key"; P=aigw-reverse-proxy; BASE="http://127.0.0.1:8317"
+KEY="你的 management key"; P=workbuddy; BASE="http://127.0.0.1:8317"
 
 # 查看当前策略与选择顺序预览
 curl -s "$BASE/v0/management/$P/routing/status" -H "Authorization: Bearer $KEY"
@@ -962,7 +962,7 @@ POST {base}/billing/meter/get-user-resource-free-packages    免费包
 ```yaml
 plugins:
   configs:
-    aigw-reverse-proxy:
+    workbuddy:
       routing:
         strategy: by_expiry      # 新增：按到期
         cooldown_seconds: 300    # 切换冷却（默认 5 分钟）
@@ -998,7 +998,7 @@ plugins:
 | 项 | 值 |
 |---|---|
 | CPA | 本地编译 v7.3.15（`CGO_ENABLED=1 go build ./cmd/server`） |
-| 插件 | 放入 `plugins/linux/arm64/aigw-reverse-proxy.so` |
+| 插件 | 放入 `plugins/linux/arm64/workbuddy.so` |
 | 登录 | 设备码：`GET /v0/management/codebuddy-auth-url` → 浏览器授权 → `GET /v0/management/get-auth-status?state=...` |
 | 账号落盘 | `/root/.cli-proxy-api/codebuddy-<uuid>.json` |
 
@@ -1046,7 +1046,7 @@ WorkBuddy 上游**只接受流式请求**。插件收到非流式请求时会：
 
 ### 方式 A：直接下载预编译插件（最快）
 
-从本仓库的 **Releases** 页下载对应架构的 `.so`，文件名统一为 `aigw-reverse-proxy.so`，
+从本仓库的 **Releases** 页下载对应架构的 `.so`，文件名统一为 `workbuddy.so`，
 按 release 标题区分 `linux/amd64` 或 `linux/arm64`。
 
 下载后直接跳到 [第 4 节](#4-安装到-cliproxyapi)。
@@ -1057,21 +1057,21 @@ WorkBuddy 上游**只接受流式请求**。插件收到非流式请求时会：
 ### 方式 B：从源码构建
 
 ```bash
-git clone https://github.com/<你的用户名>/aigw-cpa-plugin.git
-cd aigw-cpa-plugin
+git clone https://github.com/<你的用户名>/workbuddy-cpa-plugin.git
+cd workbuddy-cpa-plugin
 
 # 依赖：Go 1.26+ 与 C 编译器（cgo 必需 —— 插件是 c-shared 动态库）
 go mod download
 
 # 生产插件
-CGO_ENABLED=1 go build -buildmode=c-shared -o aigw-reverse-proxy.so .
+CGO_ENABLED=1 go build -buildmode=c-shared -o workbuddy.so .
 
 # 单元测试（32 个用例：默认值/路由/鉴权/冷却/SSE/管理端）
 CGO_ENABLED=0 go test ./...
 
 # dlopen 端到端冒烟测试（真实加载 .so 并走完一遍 RPC 会话）
 CGO_ENABLED=1 go build -o smoke-bin ./smoke
-./smoke-bin aigw-reverse-proxy.so
+./smoke-bin workbuddy.so
 ```
 
 **构建环境要点**：
@@ -1096,7 +1096,7 @@ cliproxyPluginShutdown
 
 自检：
 ```bash
-nm -D --defined-only aigw-reverse-proxy.so | grep cliproxy_plugin_init
+nm -D --defined-only workbuddy.so | grep cliproxy_plugin_init
 ```
 
 
@@ -1123,8 +1123,8 @@ git push origin v0.1.0
 Release 上应出现 3 个文件（CI 自动生成，格式由 CPA 校验过）：
 
 ```
-aigw-reverse-proxy_0.1.0_linux_arm64.zip
-aigw-reverse-proxy_0.1.0_linux_amd64.zip
+workbuddy_0.1.0_linux_arm64.zip
+workbuddy_0.1.0_linux_amd64.zip
 checksums.txt
 registry.json
 ```
@@ -1146,7 +1146,7 @@ plugins:
   dir: "plugins"
   # 追加第三方源（官方源仍是默认内置的，不需要重复写）
   store-sources:
-    - "https://raw.githubusercontent.com/<你的用户名>/aigw-cpa-plugin/main/registry.json"
+    - "https://raw.githubusercontent.com/<你的用户名>/workbuddy-cpa-plugin/main/registry.json"
   configs: {}
 ```
 
@@ -1157,7 +1157,7 @@ plugins:
 1. 拉 registry.json → 找到插件条目
 2. 查你的 GitHub Release → 按当前 `GOOS/GOARCH` 匹配对应 zip
 3. 下载 + 校验 `checksums.txt` 里的 sha256
-4. 解包 → 把 `aigw-reverse-proxy.so` 落到 `plugins/linux/<arch>/`
+4. 解包 → 把 `workbuddy.so` 落到 `plugins/linux/<arch>/`
 
 装完在 `configs` 下加插件配置（见下方「配置字段」），重启生效。
 
@@ -1167,12 +1167,40 @@ plugins:
 
 ### 方式二：手动放置 `.so`
 
-不走商店，直接手动放文件：
+不走商店，直接手动放文件。
+
+**先理解文件名的规则**（这一步很容易踩坑）：
+
+> CPA 用**动态库文件名去掉扩展名**作为插件 ID。
+> ID 必须匹配 `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`。
+> `plugins.configs` 里的键**必须与这个 ID 完全一致**，否则插件不会被加载，
+> 列表里显示 `registered=false`、模型与账号全都为空。
+
+| 文件名 | 推导出的插件 ID | `configs` 里要写 | 结果 |
+|---|---|---|---|
+| `workbuddy.so` | `workbuddy` | `workbuddy` | ✅ 正常 |
+| `workbuddy-v0.13.24.so` | `workbuddy-v0.13.24` | 需要同名 | ⚠️ 与 `workbuddy` 是两个插件 |
+| `workbuddy-0.13.10.so` | `workbuddy-0.13.10` | 需要同名 | ⚠️ 同上 |
+
+**所以不要给文件加版本号后缀**。Release 里的 zip 解出来就是 `workbuddy.so`，
+直接用它即可；更新时覆盖同一个文件。
+
+> **为什么加版本号会出问题**：`workbuddy-0.13.10.so` 会被当成一个 ID 叫
+> `workbuddy-0.13.10` 的**独立插件**，与 `workbuddy` 并存。于是删掉
+> `workbuddy` 之后列表里还有一项、看起来"删不掉"，而它又因为
+> `configs` 里没有对应条目而永远不会加载。
+
+**放置位置**（宿主按这个顺序搜索，两处都支持）：
 
 ```bash
 cd /path/to/cpa          # CPA 工作目录（config.yaml 所在目录）
-mkdir -p plugins/linux/arm64
-cp aigw-reverse-proxy.so plugins/linux/arm64/
+
+# 推荐：架构子目录
+mkdir -p plugins/linux/arm64      # 或 plugins/linux/amd64
+cp workbuddy.so plugins/linux/arm64/
+
+# 或者：直接放根目录
+cp workbuddy.so plugins/
 ```
 
 ```yaml
@@ -1180,18 +1208,15 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    aigw-reverse-proxy:
-      enabled: true
+    workbuddy:            # ← 【必须与文件名一致，且必须显式列出】
+      enabled: true       # ← 【必须显式启用，否则不加载】
       priority: 10
-      api_key: "sk-your-gateway-key"
+      api_key: [REDACTED]
       allow_no_key: false
-      default_provider: "trae"
+      default_provider: "codebuddy"
       max_rotate: 3
       error_threshold: 3
 ```
-
-**注意**：`configs` 里的键必须与 `.so` 文件名去掉扩展名后完全一致（`aigw-reverse-proxy`）。
-文件名不能改。
 
 ---
 
@@ -1213,7 +1238,7 @@ plugins:
 | `error_threshold` | 3 | 连续失败多少次才停用 |
 | `error_cooldown_millis` | 600000 | 达阈值后的停用时长（10min） |
 | `log_retention_days` | 30 | 日志保留天数 |
-| `default_provider` | `"trae"` | 无 `provider/` 前缀时使用的供应商 |
+| `default_provider` | `"codebuddy"` | 无 `provider/` 前缀时使用的供应商。源应用默认是 `"trae"`，本插件改为自身的 provider key |
 | `enforce_default_provider` | `false` | **插件新增**：只允许默认供应商 |
 | `debug` | `false` | 详细日志 |
 
@@ -1238,15 +1263,15 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 ### 状态面板
 
 ```
-/v0/resource/plugins/aigw-reverse-proxy/status
+/v0/resource/plugins/workbuddy/status
 ```
 - `Accept: text/html` → 可视化面板（调用统计 / 网关设置 / 账号池冷却 / 最近调用）
 - 否则 → JSON
 
 附加管理路由：
 ```
-GET /v0/management/aigw-reverse-proxy/status   # 同上 JSON
-GET /v0/management/aigw-reverse-proxy/calls    # 最近 50 条调用记录
+GET /v0/management/workbuddy/status   # 同上 JSON
+GET /v0/management/workbuddy/calls    # 最近 50 条调用记录
 ```
 
 ### 排障
@@ -1268,7 +1293,7 @@ GET /v0/management/aigw-reverse-proxy/calls    # 最近 50 条调用记录
 
 | 项目 | 结果 |
 |---|---|
-| 编译 `c-shared` .so | ✅ `dist/aigw-reverse-proxy.so` |
+| 编译 `c-shared` .so | ✅ `dist/workbuddy.so` |
 | ABI 符号导出 | ✅ `nm -D` 四个符号齐全 |
 | 单元测试 | ✅ 32/32 通过 |
 | `dlopen` + `cliproxy_plugin_init` | ✅ 返回 0，abi_version=1 |
@@ -1289,8 +1314,8 @@ GET /v0/management/aigw-reverse-proxy/calls    # 最近 50 条调用记录
 ## 6. 源码结构
 
 ```
-aigw-cpa-plugin/
-├── go.mod                    模块 github.com/taixu/aigw-reverse-proxy
+workbuddy-cpa-plugin/
+├── go.mod                    模块 github.com/taixu/workbuddy
 ├── cabi.go                   C ABI（dlopen 入口 + 缓冲区管理）
 ├── rpc.go                    RPC 分发 + 注册元数据 + 上游失败分类
 ├── settings.go               gatewaySettings（V1/s 复刻）+ YAML 解码

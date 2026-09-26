@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "workbuddy"
-	pluginVersion = "0.13.24"
+	pluginVersion = "0.13.25"
 	pluginAuthor  = "BlackHawk"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -77,8 +77,22 @@ type registrationCaps struct {
 	UsagePlugin                   bool `json:"usage_plugin"`
 	ManagementAPI                 bool `json:"management_api"`
 
-	// Model catalogue + execution. These four are what make WorkBuddy's models
-	// visible in /v1/models and callable through /v1/chat/completions.
+	// Model catalogue + execution. These make WorkBuddy's models visible in
+	// /v1/models and callable through /v1/chat/completions.
+	//
+	// ModelRegistrar and ModelProvider are two routes to the same catalogue and
+	// the official simple example declares both:
+	//
+	//	model.register       (ModelRegistrar) — the host calls it once at
+	//	                     startup and the plugin answers with its catalogue.
+	//	model.static /       (ModelProvider)  — the host asks on demand; with
+	//	model.for_auth                       both scopes set, it may also ask
+	//	                     per credential.
+	//
+	// Declaring only ModelProvider works, but the host then has no catalogue
+	// until it asks, so a startup-time registration pass sees nothing to
+	// publish. Declaring both lets either path populate the registry.
+	ModelRegistrar        bool     `json:"model_registrar"`
 	ModelProvider         bool     `json:"model_provider"`
 	ModelRouter           bool     `json:"model_router"`
 	Executor              bool     `json:"executor"`
@@ -152,6 +166,14 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return authRefresh(request)
 
 	// ---- model catalogue (port of a2/b.java:745 w()) -------------------
+	//
+	// model.register and model.static return the same catalogue through two
+	// host-driven paths; the official simple example implements both so either
+	// one can populate the registry. They share the implementation here for the
+	// same reason.
+	case pluginabi.MethodModelRegister:
+		return modelStatic(request)
+
 	case pluginabi.MethodModelStatic:
 		return modelStatic(request)
 
@@ -280,9 +302,14 @@ func buildRegistration() registration {
 			// Lets the panel switch between by-credits / round-robin / random.
 			Scheduler: true,
 
-			ModelProvider: true,
-			ModelRouter:   true,
-			Executor:      true,
+			// Both model routes are declared, as the official simple example
+			// does: model.register lets a startup pass publish the catalogue,
+			// model.static answers on demand, and model.for_auth serves the
+			// per-credential view the auth-file page needs.
+			ModelRegistrar: true,
+			ModelProvider:  true,
+			ModelRouter:    true,
+			Executor:       true,
 			// WorkBuddy credentials are auth-bound, so both scopes apply.
 			ExecutorModelScope: string(pluginapi.ExecutorModelScopeBoth),
 			// WorkBuddy speaks OpenAI chat-completions natively in both

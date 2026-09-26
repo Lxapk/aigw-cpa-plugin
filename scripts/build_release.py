@@ -22,20 +22,35 @@ import sys
 import zipfile
 
 
-def build_zip(plugin_id: str, so_path: str, out_path: str) -> str:
-    """把单个 .so 打进 zip（条目名 = <id>.so，位于根目录）。"""
+def build_zip(plugin_id: str, so_path: str, out_path: str, goarch: str) -> str:
+    """把单个 .so 打进 zip。
+
+    包内同时提供两种布局，对应宿主的两条搜索路径
+    （docs/examples/plugin/simple/README_CN.md「发现规则」）：
+
+        plugins/linux/<GOARCH>/<id>.so   —— 官方推荐的位置
+        <id>.so                          —— 放在 plugins 根目录时可用
+
+    包含子目录条目是为了让「解压到 plugins/ 即可」这条路径直接得到官方
+    推荐的布局，而不必手工创建 linux/<GOARCH> 目录。
+    """
     if not os.path.isfile(so_path):
         raise SystemExit(f"找不到 .so: {so_path}")
 
-    inner_name = f"{plugin_id}.so"
+    with open(so_path, "rb") as fh:
+        data = fh.read()
+
+    entries = [
+        f"{plugin_id}.so",
+        f"linux/{goarch}/{plugin_id}.so",
+    ]
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        # writestr 保证条目名不带任何目录前缀
-        with open(so_path, "rb") as fh:
-            data = fh.read()
-        info = zipfile.ZipInfo(inner_name, date_time=(1980, 1, 1, 0, 0, 0))
-        info.external_attr = 0o755 << 16  # 保留可执行权限
-        info.compress_type = zipfile.ZIP_DEFLATED
-        zf.writestr(info, data)
+        for inner_name in entries:
+            # 固定时间戳让产物可复现；writestr 保证条目名不被进一步改写。
+            info = zipfile.ZipInfo(inner_name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr = 0o755 << 16  # 保留可执行权限
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, data)
 
     return sha256_file(out_path)
 
@@ -72,7 +87,7 @@ def main() -> int:
     for goarch, so_path in targets:
         asset_name = f"{args.id}_{args.version}_linux_{goarch}.zip"
         out_path = os.path.join(args.out, asset_name)
-        digest = build_zip(args.id, so_path, out_path)
+        digest = build_zip(args.id, so_path, out_path, goarch)
         size = os.path.getsize(out_path)
         checksums.append((digest, asset_name))
         print(f"  ✓ {asset_name}  ({size:,} bytes)")

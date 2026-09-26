@@ -103,7 +103,10 @@ func TestDefaultSettingsMatchSourceApp(t *testing.T) {
 		{"error_threshold", d.ErrorThreshold, 3},
 		{"error_cooldown_millis", d.ErrorCooldownMillis, int64(600000)},
 		{"log_retention_days", d.LogRetentionDays, 30},
-		{"default_provider", d.DefaultProvider, "trae"},
+		// Deliberately not the source app's "trae": this plugin only serves
+		// WorkBuddy, and keeping the source value made enforce_default_provider
+		// reject every codebuddy/... request.
+		{"default_provider", d.DefaultProvider, workBuddyProviderKey},
 	}
 	for _, c := range checks {
 		if c.got != c.want {

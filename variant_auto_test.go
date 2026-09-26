@@ -2073,3 +2073,99 @@ func TestModelCacheClear(t *testing.T) {
 		t.Fatal("clear() left the entry behind; a stale catalogue would persist until the TTL expired")
 	}
 }
+
+// ---- capability declaration ----------------------------------------------
+
+// TestModelRegistrarIsDeclared guards against dropping the second model route.
+//
+// The official simple example ("完整能力骨架") declares both model_registrar and
+// model_provider, and CPA drives them through different RPCs:
+//
+//	model.register   — one startup pass asks for the whole catalogue
+//	model.static     — on-demand, no credential context
+//	model.for_auth   — per credential, which is what the auth-file page uses
+//
+// Declaring only model_provider leaves the registration pass with nothing to
+// publish until the host happens to ask.
+func TestModelRegistrarIsDeclared(t *testing.T) {
+	resetState()
+	res := callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{})
+
+	// capabilities sits at the top level of the registration response.
+	var doc struct {
+		Capabilities struct {
+			ModelRegistrar bool   `json:"model_registrar"`
+			ModelProvider  bool   `json:"model_provider"`
+			ModelRouter    bool   `json:"model_router"`
+			Executor       bool   `json:"executor"`
+			ModelScope     string `json:"executor_model_scope"`
+		} `json:"capabilities"`
+	}
+	if errUnmarshal := json.Unmarshal(res, &doc); errUnmarshal != nil {
+		t.Fatalf("unmarshal: %v; raw=%s", errUnmarshal, res)
+	}
+	if !doc.Capabilities.ModelRegistrar {
+		t.Error("model_registrar is not declared; the startup registration pass will see no catalogue")
+	}
+	if !doc.Capabilities.ModelProvider {
+		t.Error("model_provider is not declared")
+	}
+	if !doc.Capabilities.ModelRouter {
+		t.Error("model_router is not declared")
+	}
+	if !doc.Capabilities.Executor {
+		t.Error("executor is not declared")
+	}
+	if doc.Capabilities.ModelScope != "both" {
+		t.Errorf("executor_model_scope = %q, want both so both static and auth-bound models are offered",
+			doc.Capabilities.ModelScope)
+	}
+}
+
+// TestModelRegisterAndStaticAgree checks the two routes return the same shape,
+// since they share one implementation.
+func TestModelRegisterAndStaticAgree(t *testing.T) {
+	resetState()
+	for _, method := range []string{
+		pluginabi.MethodModelRegister,
+		pluginabi.MethodModelStatic,
+	} {
+		res, errCall := handleMethod(method, []byte(`{}`))
+		if errCall != nil {
+			t.Errorf("%s: %v", method, errCall)
+			continue
+		}
+		var out struct {
+			OK     bool `json:"ok"`
+			Result struct {
+				Provider string `json:"Provider"`
+			} `json:"result"`
+		}
+		if errUnmarshal := json.Unmarshal(res, &out); errUnmarshal != nil {
+			t.Errorf("%s unmarshal: %v", method, errUnmarshal)
+			continue
+		}
+		if !out.OK {
+			t.Errorf("%s returned ok=false", method)
+		}
+		if out.Result.Provider != workBuddyProviderKey {
+			t.Errorf("%s Provider = %q, want %q", method, out.Result.Provider, workBuddyProviderKey)
+		}
+	}
+}
+
+// TestDefaultProviderIsThisPlugin is the guard for a real defect: the default
+// came from the source app ("trae", a different gateway's provider), so turning
+// on enforce_default_provider rejected every codebuddy/... request with
+// "该网关仅允许使用默认供应商：trae" — the plugin refusing its own models.
+func TestDefaultProviderIsThisPlugin(t *testing.T) {
+	settings := defaultGatewaySettings()
+	if settings.DefaultProvider != workBuddyProviderKey {
+		t.Fatalf("DefaultProvider = %q, want %q", settings.DefaultProvider, workBuddyProviderKey)
+	}
+	// Retention of the opt-in knob matters: it defaults off, so a stale default
+	// only bites once someone turns it on.
+	if settings.EnforceDefaultProvider {
+		t.Fatal("enforce_default_provider should default off")
+	}
+}
