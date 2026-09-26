@@ -299,9 +299,12 @@ func (r *growthRunner) acceptPending(ctx context.Context, creds *workBuddyCreden
 	if len(still) > 0 {
 		logger.add("info", "仍有 %d 个未接取，重试接取一次…", len(still))
 		if errWait := r.spacing(ctx, creds); errWait == nil {
-			accepted, _, _, _ := r.client.acceptGrowthTasks(ctx, creds, still)
-			if len(accepted) > 0 {
-				logger.add("ok", "✓ 重试接取成功 %d 个", len(accepted))
+			retryAccepted, _, retryMsg, _ := r.client.acceptGrowthTasks(ctx, creds, still)
+			if len(retryAccepted) > 0 {
+				logger.add("ok", "✓ 重试接取成功 %d 个", len(retryAccepted))
+			}
+			if retryMsg != "" && strings.Contains(strings.ToLower(retryMsg), growthBuddyRequiredHint) {
+				logger.add("error", "! 上游拒绝原因：%s", retryMsg)
 			}
 		}
 		fresh, errFetch = r.fetch(ctx, creds)
@@ -320,9 +323,34 @@ func (r *growthRunner) acceptPending(ctx context.Context, creds *workBuddyCreden
 		}
 	}
 	if len(stubborn) > 0 {
-		logger.add("warn", "! 仍有 %d 个任务处于未接取状态，对未接取任务上报事件不会计入进度，本轮跳过这些任务", len(stubborn))
+		// When every pending task was rejected, a missing prerequisite is far
+		// more likely than 17 independent failures. Say so once, with the fix,
+		// rather than emitting 17 identical skip lines.
+		if len(stubborn) == len(pending) && len(pending) > 3 && buddyIsPending(fresh) {
+			logger.add("error", "✗ 全部 %d 个任务接取被拒，且「%s」仍未完成。"+
+				"上游要求先拥有活跃 Buddy，否则会拒绝其余全部任务的接取，"+
+				"猫猫旅行也会返回 no active buddy。请先在桌面端完成「%s」，再重新运行本任务。",
+				len(pending), growthDesktopOnlyTasks[growthBuddyPrerequisiteTask],
+				growthDesktopOnlyTasks[growthBuddyPrerequisiteTask])
+		} else {
+			logger.add("warn", "! 仍有 %d 个任务处于未接取状态，对未接取任务上报事件不会计入进度，本轮跳过这些任务", len(stubborn))
+		}
 	}
 	return fresh
+}
+
+// buddyIsPending reports whether the buddy-ownership task is still incomplete.
+//
+// It is the gate for the whole growth centre: every other accept is rejected
+// until a buddy exists.
+func buddyIsPending(tasks []growthTask) bool {
+	for _, task := range tasks {
+		if task.Code != growthBuddyPrerequisiteTask {
+			continue
+		}
+		return task.Status != "completed" && task.Status != "claimed"
+	}
+	return false
 }
 
 // processTask handles one task: claim if done, skip if impossible, otherwise

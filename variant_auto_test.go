@@ -845,3 +845,120 @@ func TestGrowthBaseFollowsOverride(t *testing.T) {
 		t.Fatalf("growthBase = %q, want the domestic host under override=cn", got)
 	}
 }
+
+// ---- buddy prerequisite --------------------------------------------------
+
+// TestAcceptRejectionReasonSurfaces covers the diagnostic gap that made the
+// reported run unreadable: when the upstream answered 200 with a per-task
+// rejection status, the reason was dropped, so 17 rejected tasks produced
+// "接取未成功 17 个" with no explanation.
+func TestAcceptRejectionReasonSurfaces(t *testing.T) {
+	resetState()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/accept") {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"results":[
+				{"task_code":"chat_5","status":"rejected","msg":"no active buddy"}
+			]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"tasks":[]}}`))
+	}))
+	defer srv.Close()
+
+	prev := workBuddyChatBase()
+	setChatBase(srv.URL)
+	defer setChatBase(prev)
+
+	creds := &workBuddyCredentials{
+		AccessToken: "[REDACTED]",
+		UID:         "u-buddy",
+		Domain:      "copilot.tencent.com",
+	}
+	accepted, failed, msg, _ := workBuddyUpstream.acceptGrowthTasks(context.Background(), creds, []string{"chat_5"})
+	if len(accepted) != 0 || len(failed) != 1 {
+		t.Fatalf("accepted=%v failed=%v, want 0/1", accepted, failed)
+	}
+	if !strings.Contains(msg, "no active buddy") {
+		t.Fatalf("msg = %q, want the upstream reason to surface", msg)
+	}
+}
+
+// TestBuddyIsPending checks the prerequisite detector.
+func TestBuddyIsPending(t *testing.T) {
+	cases := []struct {
+		name  string
+		tasks []growthTask
+		want  bool
+	}{
+		{name: "pending", tasks: []growthTask{{Code: "first_buddy", Status: "not_accepted"}}, want: true},
+		{name: "completed", tasks: []growthTask{{Code: "first_buddy", Status: "completed"}}, want: false},
+		{name: "claimed", tasks: []growthTask{{Code: "first_buddy", Status: "claimed"}}, want: false},
+		{name: "absent", tasks: []growthTask{{Code: "chat_5", Status: "not_accepted"}}, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := buddyIsPending(c.tasks); got != c.want {
+				t.Fatalf("buddyIsPending = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestFirstBuddyIsDesktopOnly pins the prerequisite classification: the buddy
+// task cannot be automated, and misclassifying it would send a useless event.
+func TestFirstBuddyIsDesktopOnly(t *testing.T) {
+	reason, ok := growthDesktopOnlyTasks["first_buddy"]
+	if !ok {
+		t.Fatal("first_buddy must be treated as requiring a real desktop action")
+	}
+	if !strings.Contains(reason, "前置条件") {
+		t.Fatalf("reason = %q, should say it is a prerequisite", reason)
+	}
+	spec := growthTaskSpecs["first_buddy"]
+	if !spec.Unforgeable {
+		t.Fatal("first_buddy must be marked unforgeable so no event is reported")
+	}
+}
+
+// TestTravelNeedBuddyMessageIsActionable checks the travel stage explains the
+// prerequisite instead of surfacing a bare upstream error.
+func TestTravelNeedBuddyMessageIsActionable(t *testing.T) {
+	resetState()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/travel/status"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"state":"idle"}}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/config"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"locations":[{"id":1,"name":"杭州"}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/depart"):
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":400,"msg":"no active buddy"}`))
+		default:
+			_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+		}
+	}))
+	defer srv.Close()
+
+	prev := workBuddyChatBase()
+	setChatBase(srv.URL)
+	defer setChatBase(prev)
+
+	creds := &workBuddyCredentials{
+		AccessToken: "[REDACTED]",
+		UID:         "u-buddy-travel",
+		Domain:      "copilot.tencent.com",
+	}
+	runner := newGrowthTestRunner()
+	outcome, errTravel := runner.travel(context.Background(), creds)
+	if errTravel != nil {
+		t.Fatalf("unexpected error: %v", errTravel)
+	}
+	if outcome.Action != "need_buddy" {
+		t.Fatalf("action = %q, want need_buddy", outcome.Action)
+	}
+	if !strings.Contains(outcome.Message, "领养") {
+		t.Fatalf("message %q does not tell the operator what to do", outcome.Message)
+	}
+}

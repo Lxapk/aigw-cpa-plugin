@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // This file implements the daily welfare that sits beside the growth tasks:
@@ -130,6 +131,15 @@ func (r *growthRunner) travel(ctx context.Context, creds *workBuddyCredentials) 
 		}
 		location, errDepart := r.client.departTravel(ctx, creds)
 		if errDepart != nil {
+			// "no active buddy" means the account has not adopted a buddy yet;
+			// travel (and every other task accept) is gated on that.
+			if strings.Contains(strings.ToLower(errDepart.Error()), growthBuddyRequiredHint) {
+				return growthTravelOutcome{
+					Action: "need_buddy",
+					Message: "账号还没有活跃的 Buddy，猫猫旅行与成长任务接取都会被上游拒绝。" +
+						"请先在桌面端「发现应用」领养一只 Buddy，再重新执行。",
+				}, nil
+			}
 			return growthTravelOutcome{Message: errDepart.Error()}, nil
 		}
 		return growthTravelOutcome{

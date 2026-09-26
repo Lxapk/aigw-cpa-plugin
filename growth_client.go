@@ -98,9 +98,22 @@ var growthTaskSpecs = map[string]growthTaskSpec{
 	"black_cat":           {Kind: "cat", Target: 3, Reward: 100, Name: "夜猫子任务 (23:00-08:00)"},
 	"RichMeow_Chat":       {Kind: "richmeow", Target: 1, Reward: 100, Name: "桌面对话事件链"},
 	"Library_read":        {Kind: "library", Target: 1, Reward: 100, Name: "浏览资料库"},
-	"first_buddy":         {Kind: "buddy_first", Target: 1, Reward: 0, Name: "领养首只猫猫"},
+	"first_buddy":         {Kind: "", Target: 1, Reward: 0, Name: "领养首只猫猫", Unforgeable: true},
 	"Expert_Philanthropy": {Kind: "", Target: 1, Reward: 0, Name: "公益爱心捐赠", Unforgeable: true},
 }
+
+// growthBuddyRequiredTasks lists the tasks that cannot be accepted at all until
+// the account owns an active buddy.
+//
+// The upstream answers the accept call for these with a rejection, and — as the
+// run logs show — a rejection is contagious: with no buddy the account had 17
+// pending tasks rejected in one batch, and the cat-travel stage failed with
+// "no active buddy". Detecting this lets the pass stop with one actionable
+// message instead of 17 confusing skips.
+var growthBuddyRequiredHint = "no active buddy"
+
+// growthBuddyPrerequisiteTask is the task that grants the buddy.
+const growthBuddyPrerequisiteTask = "first_buddy"
 
 // growthDesktopOnlyTasks lists tasks the upstream only credits for genuine
 // desktop-client behaviour.
@@ -112,6 +125,9 @@ var growthTaskSpecs = map[string]growthTaskSpec{
 // tells the operator what to click; doing otherwise only burns requests and
 // makes the run look broken.
 var growthDesktopOnlyTasks = map[string]string{
+	// This one is also a prerequisite: without a buddy the upstream rejects
+	// every other accept, so it is the first thing to fix.
+	"first_buddy":   "在桌面端「发现应用」领养一只 Buddy（这是其他任务的前置条件）",
 	"RichMeow_Chat": "在桌面端发起 1 次对话",
 	"Library_read":  "在桌面端打开「资料库」并读完介绍文档",
 	"Buddy_App":     "在桌面端左上角「发现应用」进入任意一个 Buddy 应用",
@@ -547,10 +563,20 @@ func (c *workBuddyClient) acceptGrowthTasks(ctx context.Context, creds *workBudd
 			Results []struct {
 				TaskCode string `json:"task_code"`
 				Status   string `json:"status"`
+				// The upstream explains a rejection per task; dropping it left
+				// the operator with a bare "17 个未接取" and no reason.
+				Msg string `json:"msg"`
 			} `json:"results"`
+			// Some deployments report the batch-level reason here.
+			Msg string `json:"msg"`
 		}
 		if len(env.Data) > 0 {
 			_ = json.Unmarshal(env.Data, &payload)
+		}
+		if payload.Msg != "" {
+			msg = payload.Msg
+		} else if strings.TrimSpace(env.Msg) != "" {
+			msg = strings.TrimSpace(env.Msg)
 		}
 		seen := make(map[string]bool, len(payload.Results))
 		for _, item := range payload.Results {
@@ -560,12 +586,19 @@ func (c *workBuddyClient) acceptGrowthTasks(ctx context.Context, creds *workBudd
 				accepted = append(accepted, item.TaskCode)
 			default:
 				failed = append(failed, item.TaskCode)
+				// Record the per-task reason when the upstream supplies one.
+				if item.Msg != "" && msg == "" {
+					msg = item.TaskCode + ": " + item.Msg
+				}
+				logGrowthDiagnostic("接取 %s 被拒: status=%q msg=%q response=%s",
+					item.TaskCode, item.Status, item.Msg, truncateForLog(raw, 200))
 			}
 		}
 		// A code the upstream did not mention was not accepted.
 		for _, code := range part {
 			if !seen[code] {
 				failed = append(failed, code)
+				logGrowthDiagnostic("接取 %s 未被上游回应（响应未包含该 task_code）", code)
 			}
 		}
 	}

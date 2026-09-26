@@ -141,6 +141,11 @@ func buildGrowthEvent(creds *workBuddyCredentials, kind string, idx int, expert 
 
 	// Unknown kinds degrade to a heartbeat rather than sending a malformed
 	// event with a fabricated eventCode.
+	//
+	// buddy_first is deliberately absent: the reference implementation's
+	// build_event has no branch for it either, because the upstream grants the
+	// buddy only through a real client action. Reporting a synthetic event would
+	// be ignored at best.
 	return growthEvent{"eventCode": "heartbeat", "timestamp": now, "userId": uid}
 }
 
