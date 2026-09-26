@@ -1,0 +1,563 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "models": [
+   {
+    "credits": "x0.79 credits",
+    "descriptionEn": "Excellent coding model, great for daily use",
+    "descriptionZh": "优秀的编码模型，适合日常使用",
+    "id": "default-model",
+    "isDefault": true,
+    "maxAllowedSize": 200000,
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "name": "Auto",
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "credits": "x0.34 credits",
+    "descriptionEn": "Fast responses for simple tasks",
+    "descriptionZh": "响应快，适合简单任务",
+    "id": "fast-model",
+    "maxAllowedSize": 200000,
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 32000,
+    "name": "Fast",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "i"
+   },
+   {
+    "credits": "x0.59 credits",
+    "descriptionEn": "Balanced speed and quality for daily working",
+    "descriptionZh": "速度与质量兼顾，日常工作首选",
+    "id": "balanced-model",
+    "maxAllowedSize": 256000,
+    "maxInputTokens": 256000,
+    "maxOutputTokens": 32000,
+    "name": "Balanced",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [
+     "craft"
+    ],
+    "temperature": 1,
+    "vendor": "f"
+   },
+   {
+    "credits": "x3.31 credits",
+    "descriptionEn": "High-quality output for complex challenges",
+    "descriptionZh": "高质量输出，胜任复杂任务",
+    "id": "primary-model",
+    "maxAllowedSize": 272000,
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 72000,
+    "name": "Primary",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "high",
+     "summary": "auto"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "vendor": "e"
+   },
+   {
+    "credits": "x3.33 credits",
+    "descriptionEn": "Deep reasoning for analysis and hard problems",
+    "descriptionZh": "深度推理，适合深度分析与难题",
+    "id": "deep-model",
+    "maxAllowedSize": 200000,
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "name": "Deep",
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "contextWindow": {
+     "defaultLength": 200000,
+     "supportedLengths": [
+      200000,
+      1000000
+     ]
+    },
+    "credits": "x0.00",
+    "descriptionEn": "Hunyuan's thinking model with enhanced reasoning capabilities",
+    "descriptionZh": "混元思考模型，具有增强的推理能力",
+    "disabledMultimodal": false,
+    "id": "hy4-preview",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 64000,
+    "name": "Hy4 preview",
+    "onlyReasoning": true,
+    "reasoning": {
+     "canDisableThinking": false,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "high"
+     ]
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 0.9,
+    "top_p": 1,
+    "vendor": "j"
+   },
+   {
+    "credits": "x0.00",
+    "descriptionEn": "Hunyuan's thinking model with enhanced reasoning capabilities",
+    "descriptionZh": "混元思考模型，具有增强的推理能力",
+    "disabledMultimodal": false,
+    "iconUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNyIgaGVpZ2h0PSIxNiIgdmlld0JveD0iLTAuNDM3NSAwIDMxLjg3NSAzMCIgZmlsbD0ibm9uZSI+CiAgPHBhdGggZD0iTTE1LjIyODcgMzBDMjMuNDYwMyAzMCAzMC4xMzMzIDIzLjI4NDMgMzAuMTMzMyAxNUMzMC4xMzMzIDYuNzE1NzMgMjMuNDYwMyAwIDE1LjIyODcgMEM2Ljk5NzIgMCAwLjMyNDIxOSA2LjcxNTczIDAuMzI0MjE5IDE1QzAuMzI0MjE5IDIzLjI4NDMgNi45OTcyIDMwIDE1LjIyODcgMzBaIiBmaWxsPSIjQjNEREYyIi8+CiAgPHBhdGggZD0iTTE1LjIzMTggMjkuOTk2NkMxOS4zNDY3IDI5Ljk5NjYgMjIuNjgyNCAyNi42Mzk1IDIyLjY4MjQgMjIuNDk4M0MyMi42ODI0IDE4LjM1NzEgMTkuMzQ2NyAxNSAxNS4yMzE4IDE1QzExLjExNyAxNSA3Ljc4MTI1IDE4LjM1NzEgNy43ODEyNSAyMi40OTgzQzcuNzgxMjUgMjYuNjM5NSAxMS4xMTcgMjkuOTk2NiAxNS4yMzE4IDI5Ljk5NjZaIiBmaWxsPSIjMDA1M0UwIi8+CiAgPG1hc2sgaWQ9Im1hc2swXzYyMV8zMTE1IiBzdHlsZT0ibWFzay10eXBlOmx1bWluYW5jZSIgbWFza1VuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeD0iMCIgeT0iMCIgd2lkdGg9IjMxIiBoZWlnaHQ9IjMwIj4KICAgIDxwYXRoIGQ9Ik0xNS4yMzI2IDMwQzIzLjQ2NDIgMzAgMzAuMTM3MiAyMy4yODQzIDMwLjEzNzIgMTVDMzAuMTM3MiA2LjcxNTczIDIzLjQ2NDIgMCAxNS4yMzI2IDBDNy4wMDExMSAwIDAuMzI4MTI1IDYuNzE1NzMgMC4zMjgxMjUgMTVDMC4zMjgxMjUgMjMuMjg0MyA3LjAwMTExIDMwIDE1LjIzMjYgMzBaIiBmaWxsPSJ3aGl0ZSIvPgogIDwvbWFzaz4KICA8ZyBtYXNrPSJ1cmwoI21hc2swXzYyMV8zMTE1KSI+CiAgICA8cGF0aCBkPSJNMTUuMjMyNCAzMEwzMC4xMzcgMzBMMzAuMTM3IDBMMTUuMjMyNCAwTDE1LjIzMjQgMzBaIiBmaWxsPSIjMDA1M0UwIi8+CiAgPC9nPgogIDxwYXRoIGQ9Ik0xNS4yMzE4IDE0Ljk5NjZDMTkuMzQ2NyAxNC45OTY2IDIyLjY4MjQgMTEuNjM5NSAyMi42ODI0IDcuNDk4MzFDMjIuNjgyNCAzLjM1NzExIDE5LjM0NjcgMCAxNS4yMzE4IDBDMTEuMTE3IDAgNy43ODEyNSAzLjM1NzExIDcuNzgxMjUgNy40OTgzMUM3Ljc4MTI1IDExLjYzOTUgMTEuMTE3IDE0Ljk5NjYgMTUuMjMxOCAxNC45OTY2WiIgZmlsbD0iI0IzRERGMiIvPgogIDxwYXRoIGQ9Ik0xNS4zNzEyIDAuMDA2NzRDMTguNTA2OSAwLjA4NDI5IDIxLjAyMjggMi42NjAxNSAyMS4wMjI4IDUuODMyNzdDMjEuMDIyOCA4LjUwOTc3IDE5LjIyNzEgMTAuODMyOCAxNi42MDA3IDExLjUwMzdDMTQuNDA5NyAxMS45NzU3IDEyLjcyNDYgMTMuOTg1MiAxMi43MjQ2IDE2LjM5MjRDMTIuNzI0NiAxOS4xNjA1IDE0Ljk1MjQgMjEuNDAyNiAxNy43MDI4IDIxLjQwMjZDMTguNDE2NCAyMS40MDI2IDE5LjM4NzkgMjEuMjM0IDIwLjAwMSAyMC45NjA5QzIzLjk2NzUgMTkuMzQ5MyAyNi40NyAxNS40NTUyIDI2LjQ3IDEwLjg4NjdDMjYuNDcgNC44NzE4OCAyMS42MjU4IDAgMTUuNjU1OSAwQzE1LjU1ODggMCAxNS40NjUgMC4wMDMzNyAxNS4zNzEyIDAuMDA2NzRaIiBmaWxsPSIjMkFCOUZGIi8+CiAgPHBhdGggZD0iTTQuMjAyMjIgMTguOTAyOEM0LjIwMjIyIDE1Ljg3MTggNS40MTE2IDEzLjEyNCA3LjM2ODA1IDExLjEyMTNDNy44NzcyNiAxMC41NTQ5IDguMTkyMTcgOS44MTMxMyA4LjE5MjE3IDguOTkzODRDOC4xOTIxNyA3LjI1NzUgNi43OTUxOCA1Ljg1MTU2IDUuMDY5ODkgNS44NTE1NkMzLjg3MDU2IDUuODUxNTYgMi44Mjg2OCA2LjUzNTk5IDIuMzA2MDcgNy41MzczM0MxLjA0OTc5IDkuNzM1NTggMC4zMjYxNzIgMTIuMjgxMSAwLjMyNjE3MiAxNS4wMDE5QzAuMzI2MTcyIDIzLjA5MzYgNi42OTQ2OCAyOS42ODUgMTQuNjY0NSAyOS45ODg0QzguODM4NzMgMjkuNjkxNyA0LjIwMjIyIDI0Ljg0MzUgNC4yMDIyMiAxOC45MDI4WiIgZmlsbD0iIzAwNTNFMCIvPgogIDxwYXRoIGQ9Ik0xNC42NjggMjkuOTg0NEMxNC44NTU2IDI5Ljk5NDUgMTUuMDQ2NSAyOS45OTc5IDE1LjIzNDEgMjkuOTk3OUMxNS4wNDMyIDI5Ljk5NzkgMTQuODU1NiAyOS45OTExIDE0LjY2OCAyOS45ODQ0WiIgZmlsbD0iIzAwNTNFMCIvPgogIDxwYXRoIGQ9Ik0xNS4zNzU2IDAuMDA3ODEyNUMxOC41MTEzIDAuMDg1MzU4IDIxLjAyNzIgMi42NjEyMiAyMS4wMjcyIDUuODMzODRDMjEuMDI3MiA4LjUxMDg0IDE5LjIwMTQgMTAuODM3MiAxNi42MDUxIDExLjUwNDhDMTQuNjI4NSAxMS45NjY3IDEzLjE2NzkgMTMuNTM0NCAxMi44MjYyIDE1LjQwMjNDMTMuODk0OCAxNS4wMDQ0IDE1LjIzMTUgMTUuMDA0NCAxNS4yMzE1IDE1LjAwNDRDMTkuMzQ4OCAxNS4wMDQ0IDIyLjY4MjEgMTEuNjQ2NCAyMi42ODIxIDcuNTA2MTJDMjIuNjgyMSAzLjM2NTg3IDE5LjQyMjUgMC4wODUzNTggMTUuMzc1NiAwLjAwNzgxMjVaIiBmaWxsPSIjRUNFQ0VFIi8+Cjwvc3ZnPgo=",
+    "id": "hy3",
+    "maxAllowedSize": 192000,
+    "maxInputTokens": 192000,
+    "maxOutputTokens": 64000,
+    "name": "Hy3",
+    "onlyReasoning": true,
+    "reasoning": {
+     "canDisableThinking": false,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "high"
+     ]
+    },
+    "relatedModels": {
+     "lite": "hy3",
+     "reasoning": "hy3"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [
+     "craft"
+    ],
+    "temperature": 0.9,
+    "top_p": 1,
+    "vendor": "j"
+   },
+   {
+    "credits": "x3.47",
+    "descriptionEn": "OpenAI's flagship model for complex reasoning and long-horizon task",
+    "descriptionZh": "OpenAI 旗舰模型，擅长复杂推理与长程任务",
+    "id": "gpt-5.6-sol",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "name": "GPT-5.6-Sol",
+    "onlyReasoning": false,
+    "reasoning": {
+     "canDisableThinking": true,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ]
+    },
+    "relatedModels": {
+     "lite": "gpt-5.6-sol",
+     "reasoning": "gpt-5.6-sol"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [],
+    "vendor": "e"
+   },
+   {
+    "credits": "x1.39",
+    "descriptionEn": "OpenAI's balanced model for capability, speed, and cost",
+    "descriptionZh": "OpenAI 均衡模型，兼顾能力、速度与成本",
+    "id": "gpt-5.6-terra",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "name": "GPT-5.6-Terra",
+    "onlyReasoning": false,
+    "reasoning": {
+     "canDisableThinking": true,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ]
+    },
+    "relatedModels": {
+     "lite": "gpt-5.6-terra",
+     "reasoning": "gpt-5.6-terra"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [],
+    "vendor": "e"
+   },
+   {
+    "credits": "x0.14",
+    "descriptionEn": "OpenAI's lightweight model for fast responses and everyday tasks",
+    "descriptionZh": "OpenAI 轻量模型，响应快速，适合日常任务",
+    "id": "gpt-5.6-luna",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "name": "GPT-5.6-Luna",
+    "onlyReasoning": false,
+    "reasoning": {
+     "canDisableThinking": true,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ]
+    },
+    "relatedModels": {
+     "lite": "gpt-5.6-luna",
+     "reasoning": "gpt-5.6-luna"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [],
+    "vendor": "e"
+   },
+   {
+    "credits": "x3.31",
+    "descriptionEn": "OpenAI's flagship model, excelling at long-horizon tasks",
+    "descriptionZh": "OpenAI 旗舰编码模型，擅长长程任务",
+    "id": "gpt-5.5",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "name": "GPT-5.5",
+    "onlyReasoning": true,
+    "reasoning": {
+     "canDisableThinking": false,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+     ]
+    },
+    "relatedModels": {
+     "lite": "gpt-5.5",
+     "reasoning": "gpt-5.5"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [],
+    "vendor": "e"
+   },
+   {
+    "credits": "x1.65",
+    "descriptionEn": "OpenAI's flagship model, excelling at long-horizon tasks",
+    "descriptionZh": "OpenAI 旗舰编码模型，擅长长程任务",
+    "id": "gpt-5.4",
+    "maxAllowedSize": 272000,
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 72000,
+    "name": "GPT-5.4",
+    "onlyReasoning": true,
+    "reasoning": {
+     "canDisableThinking": false,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+     ]
+    },
+    "relatedModels": {
+     "lite": "gpt-5.4",
+     "reasoning": "gpt-5.4"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [
+     "craft"
+    ],
+    "vendor": "e"
+   },
+   {
+    "credits": "x1.25",
+    "descriptionEn": "OpenAI's coding-specialized model, great for complex coding tasks",
+    "descriptionZh": "OpenAI 代码专用模型，非常擅长处理复杂的编码任务",
+    "id": "gpt-5.3-codex",
+    "maxAllowedSize": 272000,
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 72000,
+    "name": "GPT-5.3-Codex",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [],
+    "vendor": "e"
+   },
+   {
+    "credits": "x0.99",
+    "descriptionEn": "Well-rounded model for everyday use",
+    "descriptionZh": "能力均衡，适合日常使用",
+    "id": "gemini-3.5-flash",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 65536,
+    "name": "Gemini-3.5-Flash",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [],
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "credits": "x0.79",
+    "descriptionEn": "Great for daily use",
+    "descriptionZh": "能力均衡，适合日常使用",
+    "id": "glm-5.3",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 48000,
+    "name": "GLM-5.3",
+    "onlyReasoning": true,
+    "reasoning": {
+     "canDisableThinking": true,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "high",
+      "max"
+     ]
+    },
+    "relatedModels": {
+     "lite": "glm-5.3",
+     "reasoning": "glm-5.3"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [
+     "craft"
+    ],
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "credits": "x0.79",
+    "descriptionEn": "1M context, built for long-horizon tasks.",
+    "descriptionZh": "1M 上下文，擅长长程任务",
+    "id": "glm-5.2",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 48000,
+    "name": "GLM-5.2",
+    "onlyReasoning": false,
+    "reasoning": {
+     "canDisableThinking": true,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "high",
+      "xhigh"
+     ]
+    },
+    "relatedModels": {
+     "lite": "glm-5.2",
+     "reasoning": "glm-5.2"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [
+     "craft"
+    ],
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "credits": "x1.62",
+    "descriptionEn": "Excels at complex, long-horizon autonomous tasks, with standout front-end skills and strong knowledge work and scientific reasoning",
+    "descriptionZh": "擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。",
+    "id": "kimi-k3",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 32000,
+    "name": "Kimi-K3",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "relatedModels": {
+     "lite": "kimi-k3-1",
+     "reasoning": "kimi-k3-1"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "f"
+   },
+   {
+    "credits": "x0.52",
+    "descriptionEn": "A multimodal model, good for daily use.",
+    "descriptionZh": "多模态模型，适合日常任务",
+    "id": "kimi-k2.6",
+    "maxAllowedSize": 256000,
+    "maxInputTokens": 256000,
+    "maxOutputTokens": 32000,
+    "name": "Kimi-K2.6",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "relatedModels": {
+     "lite": "kimi-k2.6",
+     "reasoning": "kimi-k2.6"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [
+     "craft"
+    ],
+    "temperature": 1,
+    "vendor": "f"
+   }
+  ],
+  "agents": [
+   {
+    "name": "cli",
+    "models": [
+     "default-model",
+     "fast-model",
+     "balanced-model",
+     "primary-model",
+     "deep-model",
+     "hy4-preview",
+     "hy3",
+     "gpt-5.6-sol",
+     "gpt-5.6-terra",
+     "gpt-5.6-luna",
+     "gpt-5.5",
+     "gpt-5.4",
+     "gpt-5.3-codex",
+     "gemini-3.5-flash",
+     "glm-5.3",
+     "glm-5.2",
+     "kimi-k3",
+     "kimi-k2.6"
+    ]
+   },
+   {
+    "name": "general-purpose",
+    "models": []
+   },
+   {
+    "name": "compact",
+    "models": []
+   },
+   {
+    "name": "contentAnalyzer",
+    "models": [
+     "lite"
+    ]
+   },
+   {
+    "name": "terminalTitleGenerator",
+    "models": [
+     "lite"
+    ]
+   },
+   {
+    "name": "summaryGenerator",
+    "models": [
+     "lite"
+    ]
+   },
+   {
+    "name": "promptHookEvaluator",
+    "models": [
+     "lite"
+    ]
+   },
+   {
+    "name": "insightsAnalyzer",
+    "models": []
+   },
+   {
+    "name": "agentInstructions",
+    "models": []
+   },
+   {
+    "name": "statusline-setup",
+    "models": []
+   },
+   {
+    "name": "Explore",
+    "models": [
+     "lite"
+    ]
+   },
+   {
+    "name": "Plan",
+    "models": []
+   }
+  ]
+ }
+}

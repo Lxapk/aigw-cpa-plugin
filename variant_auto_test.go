@@ -1861,3 +1861,80 @@ func TestModelPathMatchesTheWorkingEndpoint(t *testing.T) {
 		t.Fatal("the /console/ form is the one that fails internationally")
 	}
 }
+
+// ---- real catalogue fixtures ---------------------------------------------
+
+// TestParsesRealCatalogues parses the responses captured from the live service
+// on both realms.
+//
+// These files are the ground truth for "the model list is incomplete": the
+// domestic catalogue carries 30 models and the international one 18, while the
+// built-in fallback holds 5. Any regression that silently swaps the real list
+// for the fallback would show up here as a count mismatch, which is exactly the
+// symptom that was reported.
+func TestParsesRealCatalogues(t *testing.T) {
+	cases := []struct {
+		file string
+		want int
+		// A model that exists only in this catalogue, chosen to prove the
+		// response was really parsed rather than falling back.
+		marker string
+	}{
+		{"testdata/models_cn.json", 30, "deepseek-v4.1-flash"},
+		{"testdata/models_ai.json", 18, "gpt-5.5"},
+	}
+	for _, c := range cases {
+		t.Run(c.file, func(t *testing.T) {
+			raw, errRead := os.ReadFile(c.file)
+			if errRead != nil {
+				t.Skipf("fixture unavailable: %v", errRead)
+			}
+			models, errParse := parseWorkBuddyModels(raw)
+			if errParse != nil {
+				t.Fatalf("parse: %v", errParse)
+			}
+			if len(models) != c.want {
+				t.Fatalf("parsed %d models, want %d — the fallback catalogue holds 5, so a short list means the real one was replaced", len(models), c.want)
+			}
+			found := false
+			for _, m := range models {
+				if m.ID == c.marker {
+					found = true
+					if m.DisplayName == "" {
+						t.Errorf("%s has no display name", m.ID)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("the catalogue is missing %q", c.marker)
+			}
+			// Context windows come from the response, not a blanket default.
+			for _, m := range models {
+				if m.ID == "auto" && m.MaxInputTokens == 0 {
+					t.Error("auto has no context window; the field was not read")
+				}
+			}
+		})
+	}
+}
+
+// TestCatalogueIsNeverSilentlyEmpty guards the fallback trigger.
+//
+// A non-2xx response (the international host answered 500 for the /console path
+// that used to be configured) makes the caller substitute five hard-coded
+// models. Parsing the two real shapes must therefore never yield zero.
+func TestCatalogueIsNeverSilentlyEmpty(t *testing.T) {
+	for _, file := range []string{"testdata/models_cn.json", "testdata/models_ai.json"} {
+		raw, errRead := os.ReadFile(file)
+		if errRead != nil {
+			continue
+		}
+		models, errParse := parseWorkBuddyModels(raw)
+		if errParse != nil {
+			t.Fatalf("%s: %v", file, errParse)
+		}
+		if len(models) == 0 {
+			t.Fatalf("%s parsed to an empty catalogue, which triggers the fallback", file)
+		}
+	}
+}

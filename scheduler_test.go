@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -259,6 +260,137 @@ func labelsOf(accounts []workBuddyAccount) []string {
 		out = append(out, a.Label)
 	}
 	return out
+}
+
+// ---- four-strategy end-to-end probe --------------------------------------
+// TestAllFourStrategiesAreActuallyEffective drives each strategy through the
+// real SchedulerPick RPC and asserts the observable behaviour, rather than
+// trusting that the switch statement routes correctly.
+//
+// The panel offers these four, so every one must demonstrably do something
+// different; a strategy that silently falls through to the default would look
+// identical to a working one in the UI.
+func TestAllFourStrategiesAreActuallyEffective(t *testing.T) {
+	candidates := func() []pluginapi.SchedulerAuthCandidate {
+		return []pluginapi.SchedulerAuthCandidate{
+			{ID: "a", Provider: workBuddyProviderKey, Status: "active"},
+			{ID: "b", Provider: workBuddyProviderKey, Status: "active"},
+			{ID: "c", Provider: workBuddyProviderKey, Status: "active"},
+		}
+	}
+	seedQuota := func() {
+		state.quota.mu.Lock()
+		state.quota.byAuth["a"] = &workBuddyQuota{Credits: 10, Known: true}
+		state.quota.byAuth["b"] = &workBuddyQuota{Credits: 500, Known: true}
+		state.quota.byAuth["c"] = &workBuddyQuota{Credits: 300, Known: true}
+		state.quota.mu.Unlock()
+	}
+
+	t.Run("按额度 by_credits", func(t *testing.T) {
+		resetState()
+		applyRoutingConfig(routingSettings{Strategy: strategyByCredits})
+		seedQuota()
+		res := callOK(t, pluginabi.MethodSchedulerPick, pluginapi.SchedulerPickRequest{
+			Provider: workBuddyProviderKey, Candidates: candidates(),
+		})
+		var out pluginapi.SchedulerPickResponse
+		mustDecode(t, res, &out)
+		if !out.Handled || out.AuthID != "b" {
+			t.Fatalf("pick = %+v, want b (500 credits)", out)
+		}
+	})
+
+	t.Run("按到期 by_expiry", func(t *testing.T) {
+		resetState()
+		applyRoutingConfig(routingSettings{Strategy: strategyByExpiry})
+		// The soonest-expiring balance must win even though it is not the
+		// richest, which is what distinguishes this strategy from by_credits.
+		state.quota.mu.Lock()
+		state.quota.byAuth["a"] = &workBuddyQuota{Credits: 10, Known: true,
+			Summary: creditSummary{SoonestExpireAt: time.Now().Add(2 * time.Hour).Unix()}}
+		state.quota.byAuth["b"] = &workBuddyQuota{Credits: 500, Known: true,
+			Summary: creditSummary{SoonestExpireAt: time.Now().Add(720 * time.Hour).Unix()}}
+		state.quota.byAuth["c"] = &workBuddyQuota{Credits: 300, Known: true,
+			Summary: creditSummary{SoonestExpireAt: time.Now().Add(360 * time.Hour).Unix()}}
+		state.quota.mu.Unlock()
+
+		res := callOK(t, pluginabi.MethodSchedulerPick, pluginapi.SchedulerPickRequest{
+			Provider: workBuddyProviderKey, Candidates: candidates(),
+		})
+		var out pluginapi.SchedulerPickResponse
+		mustDecode(t, res, &out)
+		if !out.Handled {
+			t.Fatal("by_expiry did not handle the request")
+		}
+		if out.AuthID == "b" {
+			t.Fatal("by_expiry picked the richest account; it is behaving like by_credits")
+		}
+	})
+
+	t.Run("轮巡 round_robin", func(t *testing.T) {
+		resetState()
+		applyRoutingConfig(routingSettings{Strategy: strategyRoundRobin})
+		res := callOK(t, pluginabi.MethodSchedulerPick, pluginapi.SchedulerPickRequest{
+			Provider: workBuddyProviderKey, Candidates: candidates(),
+		})
+		var out pluginapi.SchedulerPickResponse
+		mustDecode(t, res, &out)
+		// Round-robin is delegated to CPA's built-in scheduler; the plugin must
+		// name it rather than picking on its own.
+		if out.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+			t.Fatalf("delegate = %q, want the builtin round-robin", out.DelegateBuiltin)
+		}
+	})
+
+	t.Run("随机 random", func(t *testing.T) {
+		resetState()
+		applyRoutingConfig(routingSettings{Strategy: strategyRandom})
+		seen := map[string]int{}
+		for i := 0; i < 200; i++ {
+			res := callOK(t, pluginabi.MethodSchedulerPick, pluginapi.SchedulerPickRequest{
+				Provider: workBuddyProviderKey, Candidates: candidates(),
+			})
+			var out pluginapi.SchedulerPickResponse
+			mustDecode(t, res, &out)
+			if !out.Handled {
+				t.Fatal("random did not handle the request")
+			}
+			seen[out.AuthID]++
+		}
+		if len(seen) < 2 {
+			t.Fatalf("200 picks hit only %d account(s): %v — random is not random", len(seen), seen)
+		}
+		t.Logf("200 次随机分布: %v", seen)
+	})
+}
+
+// TestAutoScopeServesBothRealms is the guard for 「全部供应商」.
+//
+// In auto mode a domestic and an international account must both be selectable;
+// if the scope silently excluded one realm, half a mixed pool would never be
+// used and the operator would see accounts that never get traffic.
+func TestAutoScopeServesBothRealms(t *testing.T) {
+	resetState()
+	withVariantOverride(t, "")
+
+	cn := &workBuddyCredentials{Domain: "copilot.tencent.com"}
+	ai := &workBuddyCredentials{Domain: "www.workbuddy.ai"}
+	if !variantAllowed(cn) {
+		t.Fatal("auto excluded a domestic account")
+	}
+	if !variantAllowed(ai) {
+		t.Fatal("auto excluded an international account")
+	}
+
+	// And the narrowed scopes still work as documented.
+	withVariantOverride(t, "cn")
+	if !variantAllowed(cn) || variantAllowed(ai) {
+		t.Fatal("cn scope did not narrow to domestic accounts only")
+	}
+	withVariantOverride(t, "ai")
+	if variantAllowed(cn) || !variantAllowed(ai) {
+		t.Fatal("ai scope did not narrow to international accounts only")
+	}
 }
 
 // ---- scheduler.pick RPC -------------------------------------------------
