@@ -28,15 +28,27 @@ var workBuddyPendingLogins = newPendingLoginStore()
 
 // authIdentifier answers auth.identifier.
 //
-// CPA uses the value both to match the provider key and to label the OAuth
-// entry on the Auth page. Matching is case-insensitive host-side
-// (pluginhost/auth_provider.go: normalizeProviderID lowercases both sides), so
-// returning the display spelling fixes the label — "workbuddy" became
-// "WorkBuddy" — without changing which accounts are recognised.
+// It must return the provider key, not a display spelling.
 //
-// The routing key stays pluginName; see MethodFrontendAuthIdentifier.
+// CPA compares this value against auth.Provider in four places that decide
+// behaviour, the important one being ModelsForAuth
+// (pluginhost/adapters.go:323):
+//
+//	providerKey := normalizeProviderID(auth.Provider)   // "codebuddy"
+//	identifier  := callAuthProviderIdentifier(...)
+//	if normalizeProviderID(identifier) != providerKey { continue }
+//
+// An earlier revision returned the display name ("WorkBuddy") so the OAuth list
+// read nicely. That changed the value to "workbuddy", which no longer equals
+// "codebuddy", so ModelsForAuth skipped this plugin entirely — the account list
+// and the auth-file model button both showed nothing, and /v1/models was empty.
+// The display spelling was the only thing gained, and the real cost was every
+// model-powered surface.
+//
+// The friendly name is still available: the plugin's own panel renders it, and
+// the OAuth entry's title comes from the plugin metadata name.
 func authIdentifier() ([]byte, error) {
-	return okEnvelope(identifierResponse{Identifier: workBuddyDisplayName})
+	return okEnvelope(identifierResponse{Identifier: workBuddyProviderKey})
 }
 
 // authParse answers auth.parse: accept credential material the user pasted or

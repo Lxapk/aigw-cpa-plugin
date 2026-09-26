@@ -254,14 +254,12 @@ func main() {
 		Identifier string `json:"identifier"`
 	}
 	mustUnmarshal(identResp.Result, &ident)
-	// The Auth page labels the OAuth entry with this value, so it carries the
-	// display spelling. Recognition is case-insensitive host-side, so it must
-	// still resolve to this plugin's provider key.
-	if ident.Identifier != "WorkBuddy" {
-		die("auth identifier = %q, want the display spelling WorkBuddy", ident.Identifier)
-	}
-	if !strings.EqualFold(ident.Identifier, "codebuddy") && ident.Identifier != "WorkBuddy" {
-		die("auth identifier = %q no longer maps to the provider key", ident.Identifier)
+	// This value is compared against auth.Provider before CPA asks the plugin
+	// for models, so it must be the provider key. Returning a display spelling
+	// made the comparison fail and blanked the auth-file model list and
+	// /v1/models — the most damaging regression of this series.
+	if ident.Identifier != "codebuddy" {
+		die("auth identifier = %q, want the provider key \"codebuddy\"; a different value makes CPA skip this plugin in ModelsForAuth", ident.Identifier)
 	}
 	ok("auth.identifier -> %s", ident.Identifier)
 

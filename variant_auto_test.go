@@ -1938,3 +1938,74 @@ func TestCatalogueIsNeverSilentlyEmpty(t *testing.T) {
 		}
 	}
 }
+
+// ---- identifier must equal the provider key ------------------------------
+
+// TestAuthIdentifierEqualsProviderKey is the guard for the worst regression of
+// this series: every model-powered surface went blank.
+//
+// CPA compares the value returned here against auth.Provider before asking the
+// plugin for a model list (pluginhost/adapters.go ModelsForAuth):
+//
+//	providerKey := normalizeProviderID(auth.Provider)   // "codebuddy"
+//	if normalizeProviderID(identifier) != providerKey { continue }
+//
+// An earlier revision returned the display name "WorkBuddy" so the OAuth list
+// read nicely. That made the value "workbuddy", which does not equal
+// "codebuddy", so ModelsForAuth skipped this plugin: the auth-file model button
+// and /v1/models were both empty, and CPA never called model.for_auth at all.
+// The friendly name was the only gain; the cost was every model surface.
+func TestAuthIdentifierEqualsProviderKey(t *testing.T) {
+	resetState()
+
+	raw, err := handleMethod(pluginabi.MethodAuthIdentifier, nil)
+	if err != nil {
+		t.Fatalf("auth.identifier: %v", err)
+	}
+	var env struct {
+		Result struct {
+			Identifier string `json:"identifier"`
+		} `json:"result"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal != nil {
+		t.Fatalf("unmarshal: %v; raw=%s", errUnmarshal, raw)
+	}
+
+	if env.Result.Identifier != workBuddyProviderKey {
+		t.Fatalf("auth.identifier = %q but the provider key is %q — CPA skips the plugin in ModelsForAuth, leaving the auth-file model list and /v1/models empty",
+			env.Result.Identifier, workBuddyProviderKey)
+	}
+
+	// The provider written into an auth record must match too: it is the other
+	// half of the same comparison.
+	creds := &workBuddyCredentials{AccessToken: "[REDACTED]", UID: "u-1", Domain: "copilot.tencent.com"}
+	data := workBuddyAuthData(creds)
+	if data.Provider != workBuddyProviderKey {
+		t.Fatalf("auth.parse Provider = %q, want %q", data.Provider, workBuddyProviderKey)
+	}
+
+	// The executor and quota identifiers are compared against the same key, so
+	// they must agree too.
+	for name, call := range map[string]func() ([]byte, error){
+		"executor": executorIdentifier,
+		"quota":    quotaIdentifier,
+	} {
+		out, errCall := call()
+		if errCall != nil {
+			t.Errorf("%s identifier: %v", name, errCall)
+			continue
+		}
+		var env struct {
+			Result struct {
+				Identifier string `json:"identifier"`
+			} `json:"result"`
+		}
+		if errUnmarshal := json.Unmarshal(out, &env); errUnmarshal != nil {
+			t.Errorf("%s identifier unmarshal: %v", name, errUnmarshal)
+			continue
+		}
+		if env.Result.Identifier != workBuddyProviderKey {
+			t.Errorf("%s identifier = %q, want %q", name, env.Result.Identifier, workBuddyProviderKey)
+		}
+	}
+}

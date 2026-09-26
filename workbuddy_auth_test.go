@@ -34,13 +34,12 @@ func TestAuthIdentifier(t *testing.T) {
 	var out identifierResponse
 	mustDecode(t, res, &out)
 
-	// The Auth page labels the OAuth entry with this value, so it must be the
-	// display spelling rather than the lower-case routing key.
-	if out.Identifier != workBuddyDisplayName {
-		t.Fatalf("identifier = %q, want the display name %q", out.Identifier, workBuddyDisplayName)
-	}
-	if out.Identifier != "WorkBuddy" {
-		t.Fatalf("identifier = %q, want WorkBuddy", out.Identifier)
+	// This value is compared against auth.Provider before CPA asks the plugin
+	// for models, so it must be the provider key and not a display spelling.
+	// Returning the friendly name here made ModelsForAuth skip the plugin and
+	// blanked the auth-file model list and /v1/models.
+	if out.Identifier != workBuddyProviderKey {
+		t.Fatalf("identifier = %q, want the provider key %q", out.Identifier, workBuddyProviderKey)
 	}
 	// CPA normalises the identifier before storing it, so the plugin must keep
 	// recognising "workbuddy" as well as the original "codebuddy" key.
