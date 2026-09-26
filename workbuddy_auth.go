@@ -439,6 +439,77 @@ func refreshWorkBuddyToken(creds *workBuddyCredentials) (*workBuddyCredentials, 
 	return &updated, nil
 }
 
+// applyGrowthHeaders writes the header set the growth centre expects.
+//
+// The growth endpoints are not served by the same identity as the billing
+// endpoints: they belong to the desktop client's conversation surface, which
+// authenticates with the WorkBuddy identity (wb_identity.build_identity_headers
+// in the reference implementation) rather than the light CLI header set.
+//
+// The differences that matter:
+//
+//   - X-Domain must be the bare host ("copilot.tencent.com"), not a URL. The
+//     generic path writes "https://www.codebuddy.cn", and an unrecognised
+//     X-Domain makes the edge router answer 404 rather than 401.
+//   - X-IDE-Type/Name/Version and X-Agent-Purpose identify the desktop client;
+//     without them the request is not routed to the growth service.
+//   - The User-Agent is the WorkBuddy one, not the CLI one.
+func applyGrowthHeaders(h http.Header, creds *workBuddyCredentials) {
+	variant := variantForCredentials(creds)
+
+	host := growthDomainHost(variant)
+	origin := variant.productDomain()
+
+	h.Set("Authorization", "Bearer "+creds.AccessToken)
+	h.Set("Accept", "application/json, text/plain, */*")
+	h.Set("Content-Type", "application/json")
+	h.Set("X-Requested-With", "XMLHttpRequest")
+	h.Set("Origin", origin)
+	h.Set("Referer", origin+"/")
+	h.Set("Accept-Language", "zh-CN")
+
+	if variant == variantAi {
+		h.Set("X-Agent-Purpose", "conversation")
+		h.Set("X-IDE-Name", "WorkBuddy")
+		h.Set("X-IDE-Type", "WorkBuddy")
+		h.Set("X-IDE-Version", "5.5.2")
+		h.Set("X-Product", "WorkBuddy")
+		h.Set("User-Agent", "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2")
+	} else {
+		h.Set("X-Agent-Purpose", "conversation")
+		h.Set("X-IDE-Name", "WorkBuddy")
+		h.Set("X-IDE-Type", "WorkBuddy")
+		h.Set("X-IDE-Version", "5.5.6")
+		h.Set("X-Product", "WorkBuddy")
+		h.Set("User-Agent", "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1")
+	}
+
+	// X-Domain is a bare host for this surface. See the note above.
+	h.Set("X-Domain", host)
+
+	if creds.UID != "" {
+		h.Set("X-User-Id", creds.UID)
+	}
+	if creds.EnterpriseID != "" {
+		h.Set("X-Enterprise-Id", creds.EnterpriseID)
+		h.Set("X-Tenant-Id", creds.EnterpriseID)
+	}
+}
+
+// growthDomainHost renders the X-Domain value for the growth surface.
+//
+// It is a bare host (endpoint_for(realm, PRODUCT_DESKTOP)[1] in the reference
+// implementation), never a URL.
+func growthDomainHost(variant wbVariant) string {
+	if variant == variantAi {
+		return "www.workbuddy.ai"
+	}
+	return "copilot.tencent.com"
+}
+
+// The reference implementation (variant.rs::productDomain) is explicit that the
+// international product domain is www.codebuddy.ai, not workbuddy.ai —
+// CodeBuddy tooling classifies anything else as a self-hosted deployment.
 // applyWorkBuddyHeadersVariant ports a2/b.java:p() with the variant-correct
 // product domain for Origin/Referer.
 //

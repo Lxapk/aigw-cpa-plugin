@@ -261,17 +261,22 @@ func mainPageScript() string {
   };
 
   // ---- account toggle --------------------------------------------------
+  // toggleAccount enables or disables one account.
+  //
+  // Feedback goes to #accountMsg, which lives in the accounts tab. The previous
+  // version wrote to #runMsg — an element in a different tab — so a successful
+  // toggle produced no visible change at all and read as "禁用没生效".
   window.toggleAccount = function (uid, action, authIndex) {
-    msgSet('runMsg', '操作中…', 'muted');
+    msgSet('accountMsg', '操作中…', 'muted');
     call(BASE + '/account/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uid: uid, auth_index: authIndex || '', action: action || 'toggle' })
     }).then(function () {
-      msgSet('runMsg', '已完成', 'ok');
+      msgSet('accountMsg', action === 'enable' ? '已启用，正在刷新列表…' : '已禁用，正在刷新列表…', 'ok');
       setTimeout(function () { location.reload(); }, 500);
     }).catch(function (e) {
-      msgSet('runMsg', '操作失败：' + e.message, 'bad');
+      msgSet('accountMsg', '操作失败：' + e.message, 'bad');
     });
   };
 
@@ -314,7 +319,7 @@ func mainPageScript() string {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uid: uid, action: action === 'enable' ? 'enable' : 'disable' })
     }).then(function () {
-      msgSet('taskMsg', '已完成', 'ok');
+      msgSet('taskMsg', action === 'enable' ? '已启用，正在刷新…' : '已禁用，正在刷新…', 'ok');
       setTimeout(function () { location.reload(); }, 500);
     }).catch(function (e) {
       msgSet('taskMsg', '操作失败：' + e.message, 'bad');

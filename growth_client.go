@@ -226,7 +226,7 @@ func growthBase(creds *workBuddyCredentials) string {
 	if variantForCredentials(creds) == variantAi {
 		return workBuddyGlobalBase()
 	}
-	return chatBaseForTest()
+	return workBuddyChatBase()
 }
 
 var (
@@ -234,8 +234,11 @@ var (
 	workBuddyChatBaseCN = "https://copilot.tencent.com"
 )
 
-// chatBaseForTest exposes the domestic chat base, redirectable for tests.
-func chatBaseForTest() string {
+// workBuddyChatBase returns the domestic chat host.
+//
+// It is a variable rather than a constant so tests can point the growth client
+// at a local server; production always uses the default.
+func workBuddyChatBase() string {
 	workBuddyChatMu.RLock()
 	defer workBuddyChatMu.RUnlock()
 	return workBuddyChatBaseCN
@@ -247,7 +250,8 @@ func setChatBase(v string) {
 	workBuddyChatMu.Unlock()
 }
 
-// workBuddyWebBaseCN is the web fallback used when a claim is rejected with 400.
+// workBuddyWebBaseDefaultCN is the web fallback used when a claim is rejected
+// with 400.
 const workBuddyWebBaseDefaultCN = "https://www.workbuddy.cn"
 
 var (
@@ -255,7 +259,8 @@ var (
 	workBuddyWebBaseCN = workBuddyWebBaseDefaultCN
 )
 
-func webBaseForTest() string {
+// workBuddyWebBase returns the web host used for the claim fallback.
+func workBuddyWebBase() string {
 	workBuddyWebMu.RLock()
 	defer workBuddyWebMu.RUnlock()
 	return workBuddyWebBaseCN
@@ -290,7 +295,7 @@ func (c *workBuddyClient) growthRequest(
 	if errRequest != nil {
 		return 0, nil, errRequest
 	}
-	applyWorkBuddyHeaders(req.Header, creds)
+	applyGrowthHeaders(req.Header, creds)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -516,16 +521,16 @@ func (c *workBuddyClient) claimGrowthTask(ctx context.Context, creds *workBuddyC
 
 	webHeaders := map[string]string{
 		"Accept":            "application/json, text/plain, */*",
-		"Origin":            webBaseForTest(),
-		"Referer":           webBaseForTest() + "/profile/growth-center",
+		"Origin":            workBuddyWebBase(),
+		"Referer":           workBuddyWebBase() + "/profile/growth-center",
 		"x-client-platform": "web",
 		"User-Agent":        workBuddyWebUserAgent,
-		"X-Domain":          webBaseForTest(),
+		"X-Domain":          workBuddyWebBase(),
 	}
 	if creds.UID != "" {
 		webHeaders["X-User-Id"] = creds.UID
 	}
-	status, raw, errRequest = c.growthRequest(ctx, http.MethodPost, webBaseForTest(), path, creds, map[string]any{}, webHeaders)
+	status, raw, errRequest = c.growthRequest(ctx, http.MethodPost, workBuddyWebBase(), path, creds, map[string]any{}, webHeaders)
 	if errRequest != nil {
 		return 0, 0, firstNonEmpty(msg, errRequest.Error()), false
 	}

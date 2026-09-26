@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -383,5 +384,120 @@ func TestMainPageVariantNoteExplainsScope(t *testing.T) {
 	}
 	if !strings.Contains(page, "国际版没有签到接口") {
 		t.Fatal("variant switch must mention that the international build has no check-in")
+	}
+}
+
+// ---- account toggle ------------------------------------------------------
+
+// TestDisabledAccountIsNotUsable is the regression guard for "账号禁用没有生效".
+//
+// The panel toggle sets the pool lane's DisabledByUser, but Usable was computed
+// from the host-side Disabled flag alone. The flag was therefore stored while
+// the status column kept reporting 可用, which is exactly what the report
+// described.
+func TestDisabledAccountIsNotUsable(t *testing.T) {
+	resetState()
+
+	uid := "u-toggle"
+	authIndex := "codebuddy-" + uid + ".json"
+	storage, _ := json.Marshal(map[string]any{
+		"accessToken": "[REDACTED]", "uid": uid, "domain": "copilot.tencent.com",
+	})
+	restore := stubHostCall(func(method string, _ any) (json.RawMessage, error) {
+		if method != "host.auth.list" {
+			return json.RawMessage(`{}`), nil
+		}
+		return mustMarshal(t, map[string]any{
+			"files": []map[string]any{{
+				"auth_index":   authIndex,
+				"provider":     workBuddyProviderKey,
+				"storage_json": json.RawMessage(storage),
+			}},
+		}), nil
+	})
+	defer restore()
+
+	state.accounts.invalidate()
+	before := listWorkBuddyAccounts()
+	if len(before) != 1 {
+		t.Fatalf("got %d accounts, want 1", len(before))
+	}
+	if !before[0].Usable {
+		t.Fatal("a fresh account should be usable")
+	}
+
+	// Mirror the panel's disable request.
+	state.pool.disableAccountKeyed(before[0].UID, before[0].AuthIndex, true)
+
+	state.accounts.invalidate()
+	after := listWorkBuddyAccounts()
+	if len(after) != 1 {
+		t.Fatalf("got %d accounts after disable, want 1", len(after))
+	}
+	if !after[0].DisabledByUser {
+		t.Fatal("DisabledByUser was not stored")
+	}
+	if after[0].Usable {
+		t.Fatal("a disabled account still reports Usable, which is the reported symptom")
+	}
+
+	// The summary must agree with the row.
+	_, usable, _, _ := accountSummary(after)
+	if usable != 0 {
+		t.Fatalf("accountSummary usable = %d, want 0", usable)
+	}
+
+	// Re-enabling restores it.
+	state.pool.disableAccountKeyed(before[0].UID, before[0].AuthIndex, false)
+	state.accounts.invalidate()
+	reenabled := listWorkBuddyAccounts()
+	if !reenabled[0].Usable {
+		t.Fatal("re-enabling did not restore usability")
+	}
+}
+
+// ---- growth headers ------------------------------------------------------
+
+// TestGrowthHeadersUseDesktopIdentity pins the header set the growth surface
+// needs. The billing header helper sends X-Domain as a URL and a CLI
+// User-Agent, which the growth edge does not route.
+func TestGrowthHeadersUseDesktopIdentity(t *testing.T) {
+	creds := &workBuddyCredentials{
+		AccessToken: "[REDACTED]",
+		UID:         "u-1",
+		Domain:      "copilot.tencent.com",
+	}
+	h := make(http.Header)
+	applyGrowthHeaders(h, creds)
+
+	if got := h.Get("X-Domain"); got != "copilot.tencent.com" {
+		t.Fatalf("X-Domain = %q, want the bare host copilot.tencent.com", got)
+	}
+	if strings.HasPrefix(h.Get("X-Domain"), "http") {
+		t.Fatal("X-Domain must be a host, not a URL")
+	}
+	for _, field := range []string{"X-IDE-Type", "X-IDE-Name", "X-IDE-Version", "X-Agent-Purpose"} {
+		if h.Get(field) == "" {
+			t.Errorf("missing desktop identity header %s", field)
+		}
+	}
+	if ua := h.Get("User-Agent"); !strings.HasPrefix(ua, "WorkBuddy/") {
+		t.Fatalf("User-Agent = %q, want the WorkBuddy desktop agent", ua)
+	}
+}
+
+func TestGrowthHeadersFollowVariant(t *testing.T) {
+	resetState()
+	withVariantOverride(t, "")
+
+	creds := &workBuddyCredentials{
+		AccessToken: "[REDACTED]",
+		UID:         "u-1",
+		Domain:      "www.workbuddy.ai",
+	}
+	h := make(http.Header)
+	applyGrowthHeaders(h, creds)
+	if got := h.Get("X-Domain"); got != "www.workbuddy.ai" {
+		t.Fatalf("international X-Domain = %q, want www.workbuddy.ai", got)
 	}
 }

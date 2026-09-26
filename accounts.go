@@ -384,10 +384,15 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 		// implementation's rule that an expired balance is not a valid target.
 		// A credential flagged with a reason we already set (e.g. an unparsable
 		// file) stays unusable.
+		//
+		// DisabledByUser must be part of this test: the panel toggle only sets
+		// the pool lane, so leaving it out made a disabled account keep
+		// reporting 可用 in the very column the operator looks at, which read as
+		// "禁用没有生效" even though the flag was stored.
 		now := time.Now()
 		blockedByReason := a.Reason != "" && !a.CreditsKnown && a.UID == "" && a.CoolKind == ""
-		a.Usable = !a.Disabled && !a.Expired && !a.CreditsExpired && !blockedByReason &&
-			(a.CooldownUntil.IsZero() || !now.Before(a.CooldownUntil))
+		a.Usable = !a.Disabled && !a.DisabledByUser && !a.Expired && !a.CreditsExpired &&
+			!blockedByReason && (a.CooldownUntil.IsZero() || !now.Before(a.CooldownUntil))
 	}
 	return accounts
 }

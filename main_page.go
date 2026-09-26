@@ -199,6 +199,7 @@ func renderMainPage() string {
 	b.WriteString(`<div class="card"><h2>账号列表 <span class="hint">读取自 CPA 认证存储，登录后自动出现</span></h2>`)
 	b.WriteString(`<input type="hidden" id="accountsSignature" value="` + html.EscapeString(accountsSignature(accounts)) + `">`)
 	b.WriteString(`<div class="muted small" id="accountsStamp"></div>`)
+	b.WriteString(`<div class="muted small" id="accountMsg"></div>`)
 	if len(accounts) == 0 {
 		// Distinguish "the host could not be read" from "there really is no
 		// account". Reporting the latter while the former is true sends the

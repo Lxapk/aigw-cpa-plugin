@@ -71,7 +71,7 @@ func (f *growthFake) start(t *testing.T) {
 	f.base = srv.URL
 
 	// Redirect both hosts the engine can use.
-	previousChat, previousWeb := chatBaseForTest(), webBaseForTest()
+	previousChat, previousWeb := workBuddyChatBase(), workBuddyWebBase()
 	setChatBase(srv.URL)
 	setWebBase(srv.URL)
 	t.Cleanup(func() {
