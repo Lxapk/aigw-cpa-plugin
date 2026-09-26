@@ -30,7 +30,9 @@ import (
 //
 // Only enabled domestic accounts participate. The growth centre does not exist
 // for the international realm, so selecting them would produce a pass that
-// reports nothing but skips.
+// reports nothing but skips. The version selector narrows the set further when
+// the operator has forced 国际版, which yields an empty target list and a clear
+// message rather than a silent no-op.
 func growthRunTargets(uid string) ([]checkinAccount, string) {
 	accounts, errCollect := collectCheckinAccounts()
 	if errCollect != nil {
@@ -42,6 +44,9 @@ func growthRunTargets(uid string) ([]checkinAccount, string) {
 		if !variantForCredentials(account.Creds).hasGrowthCenter() {
 			continue
 		}
+		if !variantAllowed(account.Creds) {
+			continue
+		}
 		if accountDisabled(account) {
 			continue
 		}
@@ -50,6 +55,10 @@ func growthRunTargets(uid string) ([]checkinAccount, string) {
 
 	if uid == "" || uid == "all" {
 		if len(domestic) == 0 {
+			// Distinguish "no accounts at all" from "the selector excludes them".
+			if state.settings.get().VariantOverride == "ai" {
+				return nil, "成长任务仅国内版可用，当前已切换为国际版；请先切回「自动」或「国内版」"
+			}
 			return nil, "未找到已启用的国内版账号"
 		}
 		return domestic, ""

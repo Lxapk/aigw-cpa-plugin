@@ -459,7 +459,7 @@ func stopTaskScheduler() {
 // Disabled accounts (by the host or by the panel toggle) are skipped, and an
 // account already queued or running is not enqueued again.
 func (e *taskEngine) scanDue(now time.Time) {
-	accounts, errCollect := collectCheckinAccounts()
+	accounts, errCollect := collectActionableAccounts()
 	if errCollect != nil {
 		return
 	}

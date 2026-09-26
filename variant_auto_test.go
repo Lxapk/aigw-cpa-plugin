@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -104,7 +106,13 @@ func TestVariantForCredentialsUsesIssuerWhenDomainEmpty(t *testing.T) {
 	}
 }
 
-func TestVariantForCredentialsHonoursOverrideOverIssuer(t *testing.T) {
+// TestVariantForCredentialsIgnoresOverride is the guard for the mixed-pool bug.
+//
+// An override must not re-label an account: a token minted by one realm is
+// rejected by the other, so honouring a forced version here would guarantee
+// failure for every account on the opposite side. The selector instead gates
+// which accounts a pass acts on (see TestVariantAllowedGatesWithoutRelabeling).
+func TestVariantForCredentialsIgnoresOverride(t *testing.T) {
 	resetState()
 
 	creds := &workBuddyCredentials{
@@ -112,20 +120,54 @@ func TestVariantForCredentialsHonoursOverrideOverIssuer(t *testing.T) {
 		AccessToken: makeJWT(t, map[string]any{"iss": "https://www.workbuddy.ai"}),
 	}
 
+	// Whatever the selector says, the credential keeps its own realm.
 	withVariantOverride(t, "cn")
-	if got := variantForCredentials(creds); got != variantCn {
-		t.Fatalf("override cn ignored: got %q", got)
+	if got := variantForCredentials(creds); got != variantAi {
+		t.Fatalf("override cn re-labelled an international credential: got %q, want ai", got)
 	}
 
-	withVariantOverride(t, "ai")
 	creds.Domain = "copilot.tencent.com"
-	if got := variantForCredentials(creds); got != variantAi {
-		t.Fatalf("override ai ignored: got %q", got)
+	withVariantOverride(t, "ai")
+	if got := variantForCredentials(creds); got != variantCn {
+		t.Fatalf("override ai re-labelled a domestic credential: got %q, want cn", got)
 	}
 
 	withVariantOverride(t, "")
 	if got := variantForCredentials(creds); got != variantCn {
 		t.Fatalf("auto should follow the domain: got %q", got)
+	}
+}
+
+// TestVariantAllowedGatesWithoutRelabeling covers what the selector does do:
+// scope a batch operation, leaving each account routed to its own host.
+func TestVariantAllowedGatesWithoutRelabeling(t *testing.T) {
+	resetState()
+
+	cnCreds := &workBuddyCredentials{Domain: "copilot.tencent.com"}
+	aiCreds := &workBuddyCredentials{Domain: "www.workbuddy.ai"}
+
+	// auto: both channels are served.
+	withVariantOverride(t, "")
+	if !variantAllowed(cnCreds) || !variantAllowed(aiCreds) {
+		t.Fatal("auto must allow both variants, otherwise a mixed pool is not fully served")
+	}
+
+	// 国内版: only domestic accounts.
+	withVariantOverride(t, "cn")
+	if !variantAllowed(cnCreds) {
+		t.Fatal("override cn excluded a domestic account")
+	}
+	if variantAllowed(aiCreds) {
+		t.Fatal("override cn admitted an international account")
+	}
+
+	// 国际版: only international accounts.
+	withVariantOverride(t, "ai")
+	if variantAllowed(cnCreds) {
+		t.Fatal("override ai admitted a domestic account")
+	}
+	if !variantAllowed(aiCreds) {
+		t.Fatal("override ai excluded an international account")
 	}
 }
 
@@ -678,40 +720,64 @@ func TestAuthHostFollowsVariant(t *testing.T) {
 	}
 }
 
-// TestAuthVariantFromRequestPrefersExplicitChoice covers the override
-// interaction: an explicit request wins so one account can be added for the
-// other realm while a global override is active.
-func TestAuthVariantFromRequestPrefersExplicitChoice(t *testing.T) {
+// TestAuthVariantResolvePrefersExplicitChoice covers the override interaction:
+// an explicit request wins so one account can be added for the other realm while
+// the global selector points elsewhere.
+func TestAuthVariantResolvePrefersExplicitChoice(t *testing.T) {
 	resetState()
 
 	withVariantOverride(t, "cn")
-	if got := authVariantFromRequest("ai"); got != variantAi {
-		t.Fatalf("explicit ai while override=cn -> %q, want ai", got)
+	if got, explicit := authVariantResolve(hintRequest("ai")); got != variantAi || !explicit {
+		t.Fatalf("explicit ai while override=cn -> %q (explicit=%v), want ai", got, explicit)
 	}
-	if got := authVariantFromRequest(""); got != variantCn {
-		t.Fatalf("no hint with override=cn -> %q, want cn", got)
+	if got, explicit := authVariantResolve(hintRequest("")); got != variantCn || explicit {
+		t.Fatalf("no hint with override=cn -> %q (explicit=%v), want cn", got, explicit)
 	}
 
 	withVariantOverride(t, "ai")
-	if got := authVariantFromRequest("cn"); got != variantCn {
-		t.Fatalf("explicit cn while override=ai -> %q, want cn", got)
+	if got, explicit := authVariantResolve(hintRequest("cn")); got != variantCn || !explicit {
+		t.Fatalf("explicit cn while override=ai -> %q (explicit=%v), want cn", got, explicit)
 	}
-	if got := authVariantFromRequest(""); got != variantAi {
-		t.Fatalf("no hint with override=ai -> %q, want ai", got)
+	if got, explicit := authVariantResolve(hintRequest("")); got != variantAi || explicit {
+		t.Fatalf("no hint with override=ai -> %q (explicit=%v), want ai", got, explicit)
 	}
 
-	// Several spellings must be accepted.
+	// 自动 with no hint falls back to the domestic channel, and says so.
 	withVariantOverride(t, "")
+	if got, explicit := authVariantResolve(hintRequest("")); got != variantCn || explicit {
+		t.Fatalf("auto with no hint -> %q (explicit=%v), want the cn default", got, explicit)
+	}
+}
+
+// TestParseVariantSpellings accepts the several ways a caller may name a realm.
+func TestParseVariantSpellings(t *testing.T) {
 	for _, spelling := range []string{"ai", "intl", "global", "international", "国际", "国际版"} {
-		if got := authVariantFromRequest(spelling); got != variantAi {
-			t.Errorf("hint %q -> %q, want ai", spelling, got)
+		got, ok := parseVariant(spelling)
+		if !ok || got != variantAi {
+			t.Errorf("parseVariant(%q) = %q/%v, want ai/true", spelling, got, ok)
 		}
 	}
 	for _, spelling := range []string{"cn", "china", "domestic", "国内", "国内版"} {
-		if got := authVariantFromRequest(spelling); got != variantCn {
-			t.Errorf("hint %q -> %q, want cn", spelling, got)
+		got, ok := parseVariant(spelling)
+		if !ok || got != variantCn {
+			t.Errorf("parseVariant(%q) = %q/%v, want cn/true", spelling, got, ok)
 		}
 	}
+	// 自动 and unknown text mean "no preference".
+	for _, spelling := range []string{"", "auto", "自动", "whatever"} {
+		if _, ok := parseVariant(spelling); ok {
+			t.Errorf("parseVariant(%q) reported a preference, want none", spelling)
+		}
+	}
+}
+
+// hintRequest builds a login-start request carrying a realm hint.
+func hintRequest(variant string) pluginapi.AuthLoginStartRequest {
+	req := pluginapi.AuthLoginStartRequest{}
+	if variant != "" {
+		req.Metadata = map[string]any{"variant": variant}
+	}
+	return req
 }
 
 // TestAuthLoginUsesRealmHost proves the login request actually goes to the host
@@ -785,14 +851,14 @@ func TestPendingLoginRemembersVariant(t *testing.T) {
 	}
 }
 
-// TestAllPostLoginBasesFollowVariant is the guard for the "账号不通用" class of
-// bug on the call side.
+// TestAllPostLoginBasesFollowTheCredential is the guard for the "账号不通用"
+// class of bug on the call side.
 //
 // Every post-login surface (check-in, quota, refresh, growth) must resolve its
-// host through the variant layer rather than testing the domain directly.
-// Testing the domain alone ignored a forced override, so an account could be
-// authenticated against one realm and routed to the other.
-func TestAllPostLoginBasesFollowVariant(t *testing.T) {
+// host from the credential itself. Testing the domain directly was wrong in a
+// different way: it ignored the JWT issuer, so an account with no domain field
+// was routed to the domestic host even when its token said otherwise.
+func TestAllPostLoginBasesFollowTheCredential(t *testing.T) {
 	resetState()
 	withVariantOverride(t, "")
 
@@ -807,8 +873,6 @@ func TestAllPostLoginBasesFollowVariant(t *testing.T) {
 
 	for name, fn := range bases {
 		t.Run(name, func(t *testing.T) {
-			// Domain-driven selection.
-			withVariantOverride(t, "")
 			if got := fn(cnDomain); strings.Contains(got, "workbuddy.ai") {
 				t.Errorf("cn domain resolved to %q", got)
 			}
@@ -816,33 +880,57 @@ func TestAllPostLoginBasesFollowVariant(t *testing.T) {
 				t.Errorf("ai domain resolved to %q", got)
 			}
 
-			// A forced override must win over an empty domain.
-			withVariantOverride(t, "ai")
-			if got := fn(""); !strings.Contains(got, "workbuddy.ai") {
-				t.Errorf("override=ai with empty domain resolved to %q, want the international host", got)
-			}
-			withVariantOverride(t, "cn")
-			if got := fn(aiDomain); strings.Contains(got, "workbuddy.ai") {
-				t.Errorf("override=cn resolved to %q, want the domestic host", got)
+			// An empty domain must not pin the account to the domestic host.
+			// The caller passes "" here, so the fallback (default cn) applies;
+			// what matters is that a real ai domain still wins above.
+			if got := fn("copilot.tencent.com"); strings.Contains(got, "workbuddy.ai") {
+				t.Errorf("explicit cn domain resolved to %q", got)
 			}
 		})
 	}
 }
 
-// TestGrowthBaseFollowsOverride covers the growth host specifically.
-func TestGrowthBaseFollowsOverride(t *testing.T) {
+// TestSelectorDoesNotChangeResolvedHosts pins the interaction the user reported:
+// with the selector on 国内版, an international account's host must NOT change —
+// it is simply excluded from the pass.
+func TestSelectorDoesNotChangeResolvedHosts(t *testing.T) {
+	resetState()
+
+	aiCreds := &workBuddyCredentials{Domain: "www.workbuddy.ai"}
+
+	withVariantOverride(t, "")
+	autoHost := workBuddyCheckinBase(aiCreds.Domain)
+
+	withVariantOverride(t, "cn")
+	underCn := workBuddyCheckinBase(aiCreds.Domain)
+
+	if autoHost != underCn {
+		t.Fatalf("the selector changed the resolved host: auto=%q cn=%q", autoHost, underCn)
+	}
+	if !strings.Contains(underCn, "workbuddy.ai") {
+		t.Fatalf("an international credential resolved to %q under override=cn, but its token only works on workbuddy.ai", underCn)
+	}
+}
+
+// TestGrowthHostFollowsCredentialNotSelector pins the same rule for the growth
+// host: the selector scopes the pass, it does not re-route an account.
+func TestGrowthHostFollowsCredentialNotSelector(t *testing.T) {
 	resetState()
 
 	withVariantOverride(t, "ai")
 	creds := &workBuddyCredentials{AccessToken: "[REDACTED]", Domain: "copilot.tencent.com"}
-	if got := growthBase(creds); !strings.Contains(got, "workbuddy.ai") {
-		t.Fatalf("growthBase = %q, want the international host under override=ai", got)
+	if got := growthBase(creds); !strings.Contains(got, "copilot.tencent.com") {
+		t.Fatalf("growthBase = %q, but a domestic credential only works on the domestic host", got)
+	}
+	// The selector instead excludes it from the run.
+	if variantAllowed(creds) {
+		t.Fatal("override ai must exclude a domestic account from a growth pass")
 	}
 
 	withVariantOverride(t, "cn")
-	creds.Domain = "www.workbuddy.ai"
-	if got := growthBase(creds); !strings.Contains(got, "copilot.tencent.com") {
-		t.Fatalf("growthBase = %q, want the domestic host under override=cn", got)
+	aiCreds := &workBuddyCredentials{AccessToken: "[REDACTED]", Domain: "www.workbuddy.ai"}
+	if got := growthBase(aiCreds); !strings.Contains(got, "workbuddy.ai") {
+		t.Fatalf("growthBase = %q, but an international credential only works on workbuddy.ai", got)
 	}
 }
 
@@ -960,5 +1048,233 @@ func TestTravelNeedBuddyMessageIsActionable(t *testing.T) {
 	}
 	if !strings.Contains(outcome.Message, "领养") {
 		t.Fatalf("message %q does not tell the operator what to do", outcome.Message)
+	}
+}
+
+// ---- auto-disable --------------------------------------------------------
+
+// TestPermanentFailureRetiresTheAccount covers the requested behaviour: a call
+// that fails for a reason retrying cannot fix must disable the account, and the
+// retirement must be visible and reversible.
+func TestPermanentFailureRetiresTheAccount(t *testing.T) {
+	resetState()
+	state.pool.observe(workBuddyProviderKey, "u-retire", "acct")
+
+	retired := state.pool.failure(workBuddyProviderKey, "u-retire", failureAuth,
+		"invalid token", state.settings.get(), true)
+	if !retired {
+		t.Fatal("failure() reported no retirement for a permanent failure")
+	}
+
+	lane, _ := state.pool.findAccountKeyedCopy("u-retire", "")
+	if !lane.Disabled {
+		t.Fatal("the internal Disabled bit was not set")
+	}
+	if !lane.DisabledByUser {
+		t.Fatal("the account would still render as 启用 in the panel")
+	}
+	if !lane.AutoDisabled {
+		t.Fatal("the retirement is not attributed to the pool")
+	}
+	if lane.DisabledReason == "" {
+		t.Fatal("no reason recorded, so the panel cannot explain the retirement")
+	}
+
+	// It must be excluded from selection.
+	if got := state.pool.pick(workBuddyProviderKey, nil, time.Now()); got != nil {
+		t.Fatal("a retired account is still selectable")
+	}
+
+	// The audit trail records it.
+	history := state.pool.autoDisableHistory()
+	if len(history) != 1 || history[0].UID != "u-retire" {
+		t.Fatalf("audit history = %+v", history)
+	}
+
+	// Re-enabling restores it, including the internal bit.
+	state.pool.disableAccountKeyed("u-retire", "", false)
+	restored, _ := state.pool.findAccountKeyedCopy("u-retire", "")
+	if restored.Disabled || restored.DisabledByUser || restored.AutoDisabled {
+		t.Fatalf("re-enable left flags set: %+v", restored)
+	}
+	if got := state.pool.pick(workBuddyProviderKey, nil, time.Now()); got == nil {
+		t.Fatal("the account is still unselectable after re-enabling")
+	}
+	if hist := state.pool.autoDisableHistory(); len(hist) == 1 && !hist[0].Recovered {
+		t.Fatal("the audit entry was not marked recovered")
+	}
+}
+
+// TestRecoverableFailureDoesNotRetire is the other half: a failure that fixes
+// itself must only cool the account down.
+func TestRecoverableFailureDoesNotRetire(t *testing.T) {
+	resetState()
+	state.pool.observe(workBuddyProviderKey, "u-throttled", "acct")
+
+	if got := state.pool.failure(workBuddyProviderKey, "u-throttled", failureRate,
+		"429 too many requests", state.settings.get(), false); got {
+		t.Fatal("a rate limit retired the account")
+	}
+	lane, _ := state.pool.findAccountKeyedCopy("u-throttled", "")
+	if lane.Disabled || lane.DisabledByUser || lane.AutoDisabled {
+		t.Fatalf("a recoverable failure disabled the account: %+v", lane)
+	}
+	if lane.CooldownUntil.IsZero() {
+		t.Fatal("a rate limit should still set a cooldown")
+	}
+}
+
+// TestInterceptRetiresAccountOn401 exercises the whole path the request takes,
+// rather than calling failure() directly.
+//
+// The direct-call test cannot catch a regression in the classification: it
+// passes permanent=true itself. Driving the intercept RPC is what proves a real
+// 401 from upstream actually retires the account.
+func TestInterceptRetiresAccountOn401(t *testing.T) {
+	resetState()
+	callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{
+		ConfigYAML: []byte("error_threshold: 1\n"),
+	})
+	state.pool.observe(workBuddyProviderKey, "acc-401", "acct")
+
+	callOK(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+		RequestID:      "r-401",
+		Model:          "claude-sonnet-4",
+		StatusCode:     http.StatusUnauthorized,
+		RequestHeaders: http.Header{"X-WorkBuddy-Provider": []string{workBuddyProviderKey}, "X-WorkBuddy-Auth-Id": []string{"acc-401"}},
+		Body:           []byte(`{"error":{"message":"invalid token","type":"authentication_error"}}`),
+	})
+
+	lane, ok := state.pool.findAccountKeyedCopy("acc-401", "")
+	if !ok {
+		t.Fatal("lane missing")
+	}
+	if !lane.Disabled || !lane.AutoDisabled {
+		t.Fatalf("a 401 did not retire the account: %+v", lane)
+	}
+	if lane.DisabledReason == "" {
+		t.Fatal("no reason recorded for the retirement")
+	}
+	if hist := state.pool.autoDisableHistory(); len(hist) == 0 {
+		t.Fatal("the retirement was not audited")
+	}
+}
+
+// TestInterceptKeepsAccountOn429 is the counterpart: a throttle must not retire.
+func TestInterceptKeepsAccountOn429(t *testing.T) {
+	resetState()
+	callOK(t, pluginabi.MethodPluginRegister, lifecycleRequest{
+		ConfigYAML: []byte("error_threshold: 1\n"),
+	})
+	state.pool.observe(workBuddyProviderKey, "acc-429", "acct")
+
+	callOK(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+		RequestID:      "r-429",
+		Model:          "claude-sonnet-4",
+		StatusCode:     http.StatusTooManyRequests,
+		RequestHeaders: http.Header{"X-WorkBuddy-Provider": []string{workBuddyProviderKey}, "X-WorkBuddy-Auth-Id": []string{"acc-429"}},
+		Body:           []byte(`{"error":{"message":"rate limit exceeded"}}`),
+	})
+
+	lane, ok := state.pool.findAccountKeyedCopy("acc-429", "")
+	if !ok {
+		t.Fatal("lane missing")
+	}
+	if lane.Disabled || lane.AutoDisabled {
+		t.Fatalf("a 429 retired the account: %+v", lane)
+	}
+	if len(state.pool.autoDisableHistory()) != 0 {
+		t.Fatal("a 429 was recorded as an auto-disable")
+	}
+}
+
+// TestPermanentFailureClassification pins which upstream answers retire an
+// account, so a future edit cannot quietly widen it.
+func TestPermanentFailureClassification(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		err    upstreamError
+		want   bool
+	}{
+		{"401", http.StatusUnauthorized, upstreamError{Kind: failureAuth, Message: "unauthorized"}, true},
+		{"403", http.StatusForbidden, upstreamError{Kind: failureAuth, Message: "forbidden"}, true},
+		{"400 invalid token", http.StatusBadRequest, upstreamError{Kind: failureAuth, Message: "invalid token"}, true},
+		{"400 登录已过期", http.StatusBadRequest, upstreamError{Kind: failureQuota, Message: "登录已过期"}, true},
+		{"400 plain", http.StatusBadRequest, upstreamError{Kind: failureTransient, Message: "bad request shape"}, false},
+		{"429", http.StatusTooManyRequests, upstreamError{Kind: failureRate, Message: "rate limited"}, false},
+		{"402", http.StatusPaymentRequired, upstreamError{Kind: failureQuota, Message: "no credits"}, false},
+		{"404", http.StatusNotFound, upstreamError{Kind: failureTransient, Message: "not found"}, false},
+		{"500", http.StatusInternalServerError, upstreamError{Kind: failureTransient, Message: "boom"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPermanentFailure(c.status, c.err); got != c.want {
+				t.Fatalf("isPermanentFailure(%d, %q) = %v, want %v", c.status, c.err.Message, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSplitAccountsByVariant checks the grouping the account list renders.
+func TestSplitAccountsByVariant(t *testing.T) {
+	accounts := []workBuddyAccount{
+		{UID: "cn-1", Variant: "cn"},
+		{UID: "ai-1", Variant: "ai"},
+		{UID: "cn-2", Variant: "cn"},
+		{UID: "unknown"}, // defaults to the domestic group
+	}
+	cn, ai := splitAccountsByVariant(accounts)
+	if len(cn) != 3 {
+		t.Fatalf("cn group = %d, want 3", len(cn))
+	}
+	if len(ai) != 1 {
+		t.Fatalf("ai group = %d, want 1", len(ai))
+	}
+	if ai[0].UID != "ai-1" {
+		t.Fatalf("ai group contains %q", ai[0].UID)
+	}
+}
+
+// TestAutoDisabledAccountReportsUsableFalse guards the earlier "禁用没生效"
+// bug for the automatic path too.
+func TestAutoDisabledAccountReportsUsableFalse(t *testing.T) {
+	resetState()
+	uid := "u-usable"
+	authIndex := "codebuddy-" + uid + ".json"
+	storage, _ := json.Marshal(map[string]any{
+		"accessToken": "[REDACTED]", "uid": uid, "domain": "copilot.tencent.com",
+	})
+	restore := stubHostCall(func(method string, _ any) (json.RawMessage, error) {
+		if method != "host.auth.list" {
+			return json.RawMessage(`{}`), nil
+		}
+		return mustMarshal(t, map[string]any{
+			"files": []map[string]any{{
+				"auth_index":   authIndex,
+				"provider":     workBuddyProviderKey,
+				"storage_json": json.RawMessage(storage),
+			}},
+		}), nil
+	})
+	defer restore()
+
+	state.accounts.invalidate()
+	if !listWorkBuddyAccounts()[0].Usable {
+		t.Fatal("a fresh account should be usable")
+	}
+
+	state.pool.failure(workBuddyProviderKey, uid, failureAuth, "invalid token", state.settings.get(), true)
+	state.accounts.invalidate()
+
+	after := listWorkBuddyAccounts()[0]
+	if !after.AutoDisabled {
+		t.Fatal("the account was not marked auto-disabled")
+	}
+	if after.Usable {
+		t.Fatal("an auto-disabled account still reports 可用")
+	}
+	if after.DisabledReason == "" {
+		t.Fatal("the panel has no reason to show")
 	}
 }

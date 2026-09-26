@@ -57,6 +57,17 @@ type credentialLane struct {
 	Disabled bool `json:"disabled"`
 	// DisabledByUser tracks manual toggles from the panel.
 	DisabledByUser bool `json:"disabled_by_user"`
+	// AutoDisabled reports that the pool retired this account itself, after a
+	// failure that cannot be recovered by retrying (dead credential, revoked
+	// token). It is what the面板 shows as 原因「自动禁用」 and what lets the
+	// operator re-enable the account knowingly.
+	AutoDisabled bool `json:"auto_disabled"`
+	// DisabledReason explains why the account was retired.
+	DisabledReason string `json:"disabled_reason,omitempty"`
+	// DisabledAt records when that happened.
+	DisabledAt time.Time `json:"disabled_at,omitempty"`
+	// Variant is the credential's realm, shown in the grouped account list.
+	Variant string `json:"variant,omitempty"`
 	// Enabled mirrors W1.d.f (defaults to true in the app).
 	Enabled bool `json:"enabled"`
 	// StatusMessage mirrors V1.n.g / W1.d.f3831g.
@@ -102,13 +113,19 @@ func (p *credentialPool) disableAccount(uid string, disabled bool) {
 // one of them silently created an orphan disabled lane while the live lane
 // stayed enabled — the "账号禁用不了" report. Both are applied so the toggle
 // always lands on the lane that actually serves traffic.
+// disableAccountKeyed applies the panel's enable/disable toggle.
+//
+// Enabling must also clear the pool's own retirement (Disabled /
+// AutoDisabled / cooldown): otherwise a manually re-enabled account stayed
+// unusable because the internal bit was still set, and the toggle looked
+// broken.
 func (p *credentialPool) disableAccountKeyed(uid, authIndex string, disabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	matched := false
 	for _, lane := range p.lanes {
 		if (uid != "" && lane.UID == uid) || (authIndex != "" && lane.UID == authIndex) {
-			lane.DisabledByUser = disabled
+			p.applyToggleLocked(lane, disabled)
 			matched = true
 		}
 	}
@@ -120,7 +137,72 @@ func (p *credentialPool) disableAccountKeyed(uid, authIndex string, disabled boo
 		return
 	}
 	lane := p.laneLocked(workBuddyProviderKey, key)
+	p.applyToggleLocked(lane, disabled)
+}
+
+// applyToggleLocked writes one enable/disable decision. Caller holds p.mu.
+func (p *credentialPool) applyToggleLocked(lane *credentialLane, disabled bool) {
 	lane.DisabledByUser = disabled
+	if disabled {
+		return
+	}
+	// Re-enabling lifts every internal retirement this lane accumulated.
+	lane.Disabled = false
+	lane.AutoDisabled = false
+	lane.DisabledReason = ""
+	lane.DisabledAt = time.Time{}
+	lane.ConsecutiveErrors = 0
+	lane.CooldownUntil = time.Time{}
+	lane.CoolKind = coolKindNone
+	lane.StatusMessage = ""
+	p.markRecoveredLocked(lane.UID)
+}
+
+// autoDisableEvent records one automatic retirement, for the panel's history.
+type autoDisableEvent struct {
+	UID       string    `json:"uid"`
+	Label     string    `json:"label"`
+	Reason    string    `json:"reason"`
+	Variant   string    `json:"variant,omitempty"`
+	At        time.Time `json:"at"`
+	Recovered bool      `json:"recovered"`
+}
+
+// recordAutoDisableLocked appends an audit entry. Caller holds p.mu.
+//
+// A wrong retirement is otherwise invisible: the account simply stops being
+// used and nothing says why or when.
+func (p *credentialPool) recordAutoDisableLocked(lane *credentialLane, reason string) {
+	p.autoDisables = append(p.autoDisables, autoDisableEvent{
+		UID:     lane.UID,
+		Label:   lane.Label,
+		Reason:  reason,
+		Variant: lane.Variant,
+		At:      time.Now(),
+	})
+	if len(p.autoDisables) > 50 {
+		p.autoDisables = p.autoDisables[len(p.autoDisables)-50:]
+	}
+}
+
+// autoDisableHistory returns the recorded retirements, newest last.
+func (p *credentialPool) autoDisableHistory() []autoDisableEvent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]autoDisableEvent, len(p.autoDisables))
+	copy(out, p.autoDisables)
+	return out
+}
+
+// markRecoveredLocked flags the latest retirement of a uid as undone.
+// Caller holds p.mu.
+func (p *credentialPool) markRecoveredLocked(uid string) {
+	for i := len(p.autoDisables) - 1; i >= 0; i-- {
+		if p.autoDisables[i].UID == uid && !p.autoDisables[i].Recovered {
+			p.autoDisables[i].Recovered = true
+			return
+		}
+	}
 }
 
 // findAccount returns a lane by uid, or nil.
@@ -195,6 +277,8 @@ type credentialPool struct {
 	mu    sync.Mutex
 	lanes map[string]*credentialLane
 	order []string
+	// autoDisables is the audit trail of accounts the pool retired itself.
+	autoDisables []autoDisableEvent
 }
 
 func newCredentialPool() *credentialPool {
@@ -318,9 +402,12 @@ const (
 
 // failure ports A0.s.p(...) plus V1.k.c(): applies the correct cooldown for the
 // failure class and parks the lane permanently once `disabled` is signalled.
-func (p *credentialPool) failure(provider, uid string, kind failureKind, reason string, settings gatewaySettings, permanent bool) {
+//
+// Returns whether the lane was actually retired by this call, so the caller can
+// log the retirement once instead of inferring it.
+func (p *credentialPool) failure(provider, uid string, kind failureKind, reason string, settings gatewaySettings, permanent bool) bool {
 	if provider == "" || uid == "" {
-		return
+		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -340,9 +427,19 @@ func (p *credentialPool) failure(provider, uid string, kind failureKind, reason 
 
 	if permanent {
 		// V1.k.c() case 2: permanent disable.
+		//
+		// Also stamp the user-visible flag and reason. Previously only the
+		// internal Disabled bit was set, so an account the pool had retired for
+		// a bad credential still rendered as 启用 in the panel and offered no
+		// explanation — the operator had to infer it from the call log.
 		lane.Disabled = true
+		lane.DisabledByUser = true
+		lane.AutoDisabled = true
+		lane.DisabledReason = reason
+		lane.DisabledAt = now
 		lane.StatusMessage = reason
-		return
+		p.recordAutoDisableLocked(lane, reason)
+		return true
 	}
 
 	switch kind {
@@ -382,11 +479,12 @@ func (p *credentialPool) failure(provider, uid string, kind failureKind, reason 
 			lane.CooldownUntil = now.Add(time.Duration(settings.ErrorCooldownMillis) * time.Millisecond)
 			lane.StatusMessage = reason
 			lane.ConsecutiveErrors = 0
-			return
+			return false
 		}
 		lane.CooldownUntil = now.Add(time.Duration(settings.SoftCooldownMillis) * time.Millisecond)
 		lane.StatusMessage = reason
 	}
+	return false
 }
 
 // pick ports A0/s.java:585 t(providerId, exclude):

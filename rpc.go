@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "workbuddy"
-	pluginVersion = "0.13.13"
+	pluginVersion = "0.13.14"
 	pluginAuthor  = "BlackHawk"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -196,6 +196,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return quotaReset()
 
 	// ---- frontend auth (port of V1/o.j) -------------------------------
+	//
+	// This one is a routing key, not a label: CPA mounts the client-API-key gate
+	// at /v0/resource/plugins/<pluginName>, so it must stay the plugin's
+	// directory-safe name.
 	case pluginabi.MethodFrontendAuthIdentifier:
 		return okEnvelope(identifierResponse{Identifier: pluginName})
 

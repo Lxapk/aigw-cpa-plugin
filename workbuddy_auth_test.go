@@ -32,8 +32,38 @@ func TestAuthIdentifier(t *testing.T) {
 	res := callOK(t, pluginabi.MethodAuthIdentifier, nil)
 	var out identifierResponse
 	mustDecode(t, res, &out)
-	if out.Identifier != workBuddyProviderKey {
-		t.Fatalf("identifier = %q, want %q", out.Identifier, workBuddyProviderKey)
+
+	// The Auth page labels the OAuth entry with this value, so it must be the
+	// display spelling rather than the lower-case routing key.
+	if out.Identifier != workBuddyDisplayName {
+		t.Fatalf("identifier = %q, want the display name %q", out.Identifier, workBuddyDisplayName)
+	}
+	if out.Identifier != "WorkBuddy" {
+		t.Fatalf("identifier = %q, want WorkBuddy", out.Identifier)
+	}
+	// CPA normalises the identifier before storing it, so the plugin must keep
+	// recognising "workbuddy" as well as the original "codebuddy" key.
+	if !isWorkBuddyProvider(out.Identifier) {
+		t.Fatalf("identifier %q is no longer recognised by the plugin's own matcher", out.Identifier)
+	}
+	if !isWorkBuddyProvider("workbuddy") {
+		t.Fatal("the lower-cased form CPA persists is not recognised, so existing accounts would vanish")
+	}
+	if !isWorkBuddyProvider("codebuddy") {
+		t.Fatal("the original provider key is not recognised, so existing accounts would vanish")
+	}
+}
+
+// TestFrontendAuthIdentifierStaysARoutingKey guards the other identifier: CPA
+// mounts the client-API-key gate under the plugin's directory-safe name, so it
+// must keep the lower-case pluginName.
+func TestFrontendAuthIdentifierStaysARoutingKey(t *testing.T) {
+	resetState()
+	res := callOK(t, pluginabi.MethodFrontendAuthIdentifier, nil)
+	var out identifierResponse
+	mustDecode(t, res, &out)
+	if out.Identifier != pluginName {
+		t.Fatalf("frontend identifier = %q, want the routing key %q", out.Identifier, pluginName)
 	}
 }
 

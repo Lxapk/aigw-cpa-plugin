@@ -82,6 +82,12 @@ type workBuddyAccount struct {
 	Usable        bool      `json:"usable"`
 	// DisabledByUser reports the operator's manual enable/disable toggle.
 	DisabledByUser bool `json:"disabled_by_user"`
+	// AutoDisabled reports that the pool retired this account itself, after a
+	// failure that retrying cannot fix. Distinguished from DisabledByUser so the
+	// panel can say who disabled it and why.
+	AutoDisabled bool `json:"auto_disabled"`
+	// DisabledReason carries the upstream message that caused the retirement.
+	DisabledReason string `json:"disabled_reason,omitempty"`
 
 	// credentials is the parsed credential material, kept for internal callers
 	// (model catalogue, quota refresh). Unexported so it never reaches JSON.
@@ -277,6 +283,12 @@ func accountScore(a workBuddyAccount) int {
 }
 
 // isWorkBuddyAuthEntry applies the strict provider filter.
+// isWorkBuddyAuthEntry reports whether a host auth entry belongs to this plugin.
+//
+// It accepts the internal key or the display name in either the provider or type
+// field, and falls back to the file name for hosts that only expose that. All
+// comparisons are case-insensitive because CPA lower-cases the identifier before
+// persisting it.
 func isWorkBuddyAuthEntry(entry hostAuthEntry) bool {
 	// Accept the internal key or the display name, in either field.
 	for _, candidate := range []string{entry.Provider, entry.Type} {
@@ -284,10 +296,15 @@ func isWorkBuddyAuthEntry(entry hostAuthEntry) bool {
 			return true
 		}
 	}
-	// Some hosts only expose the file name; a "codebuddy-" prefix is ours.
+	// Some hosts only expose the file name; a "codebuddy-"/"workbuddy-" prefix
+	// is ours. Both spellings appear depending on which identifier CPA stored.
 	name := strings.ToLower(firstNonEmpty(entry.AuthIndex, entry.Name))
-	return strings.HasPrefix(name, workBuddyProviderKey+"-") ||
-		strings.HasPrefix(name, workBuddyProviderKey+"_")
+	for _, prefix := range []string{workBuddyProviderKey, workBuddyDisplayNameLower} {
+		if strings.HasPrefix(name, prefix+"-") || strings.HasPrefix(name, prefix+"_") {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeAuthEntries tolerates the shapes host.auth.list may return.
@@ -377,6 +394,10 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 			}
 			a.CooldownUntil = lane.CooldownUntil
 			a.DisabledByUser = lane.DisabledByUser
+			a.AutoDisabled = lane.AutoDisabled
+			if lane.AutoDisabled {
+				a.DisabledReason = firstNonEmpty(lane.DisabledReason, lane.StatusMessage)
+			}
 			break
 		}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -40,8 +41,20 @@ func interceptResponse(request []byte) ([]byte, error) {
 	// --- failure classification (V1/o.k step 9) ------------------------
 	if statusCode >= 400 {
 		upErr := classifyUpstream(statusCode, req.Body)
+		autoDisabled := false
 		if ctx.Provider != "" {
-			state.pool.failure(ctx.Provider, ctx.UID, upErr.Kind, upErr.Message, state.settings.get(), false)
+			// A credential the upstream has rejected as invalid will not start
+			// working on the next attempt, so the account is retired rather
+			// than merely cooled down. Everything else (429, quota exhaustion,
+			// 5xx) is recoverable and keeps its cooldown.
+			permanent := isPermanentFailure(statusCode, upErr)
+			autoDisabled = state.pool.failure(ctx.Provider, ctx.UID, upErr.Kind, upErr.Message, state.settings.get(), permanent)
+		}
+		errorText := upstreamErrText(upErr)
+		if autoDisabled {
+			// Folded into the same record: adding a second entry would count
+			// the failure twice in the totals.
+			errorText += "（已自动禁用该账号）"
 		}
 		state.log.add(callRecord{
 			ProviderID:     ctx.Provider,
@@ -52,7 +65,7 @@ func interceptResponse(request []byte) ([]byte, error) {
 			Stream:         ctx.Stream,
 			StatusCode:     statusCode,
 			LatencyMillis:  elapsed(ctx),
-			Error:          upstreamErrText(upErr),
+			Error:          errorText,
 			StartedAt:      ctx.StartedAt,
 		})
 		return okEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -199,4 +212,50 @@ func extractUsage(body []byte) (usagePayload, bool) {
 		return usagePayload{}, false
 	}
 	return *doc.Usage, true
+}
+
+// isPermanentFailure reports whether a failure should retire the account.
+//
+// Retiring is a strong action: it takes the credential out of rotation until an
+// operator notices. It is therefore limited to the failures that provably cannot
+// fix themselves:
+//
+//	401 / 403 with an auth-class error -> the token is rejected outright;
+//	400 whose text names an invalid credential -> same, reported as bad request.
+//
+// Deliberately NOT permanent:
+//
+//	429                 -> rate limit, recovers on its own;
+//	402 / quota wording -> the balance may be topped up;
+//	5xx / timeouts      -> upstream problem, says nothing about the credential.
+//
+// Retiring on quota exhaustion was considered and rejected: running out of
+// credits is normally temporary, so it would permanently remove an account that
+// a top-up would have restored.
+func isPermanentFailure(statusCode int, upErr upstreamError) bool {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	case http.StatusBadRequest:
+		// Some gateways answer 400 for a rejected credential. Only treat it as
+		// permanent when the text says so; a plain 400 is usually a bad request
+		// shape.
+		return upErr.Kind == failureAuth || mentionsInvalidCredential(upErr.Message)
+	}
+	return false
+}
+
+// mentionsInvalidCredential looks for the wording these gateways use when a
+// token is no longer accepted.
+func mentionsInvalidCredential(message string) bool {
+	lower := strings.ToLower(message)
+	for _, marker := range []string{
+		"invalid token", "invalid_token", "token expired", "token has expired",
+		"unauthorized", "未授权", "登录已过期", "凭据无效", "凭证无效",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }

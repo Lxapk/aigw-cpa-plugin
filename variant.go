@@ -40,13 +40,6 @@ var allVariants = []wbVariant{variantCn, variantAi}
 // Many domestic credentials carry an empty domain, and the domain-only check
 // silently labelled every one of them "cn" even when the token said otherwise.
 func variantForDomain(domain string) wbVariant {
-	override := state.settings.get().VariantOverride
-	if override == "ai" {
-		return variantAi
-	}
-	if override == "cn" {
-		return variantCn
-	}
 	return variantFromDomainOnly(domain)
 }
 
@@ -62,6 +55,13 @@ func variantFromDomainOnly(domain string) wbVariant {
 
 // variantForCredentials resolves the variant of a stored credential.
 //
+// The credential's own signals decide which service it belongs to; the global
+// override does NOT rewrite that. A token minted by one realm is rejected by the
+// other, so relabelling an account because an operator picked a version would
+// guarantee failure for every account on the other side. The override therefore
+// only gates which accounts a pass will act on (see variantAllowed), leaving
+// each credential routed to the host that actually serves it.
+//
 // Signal order, ported from the reference implementation's
 // detect_realm_from_token() (wb_accounts.py:162):
 //
@@ -71,18 +71,7 @@ func variantFromDomainOnly(domain string) wbVariant {
 //  3. the default, which — unlike the app — is 国内版, because a credential
 //     that reached this plugin came through the Tencent login flow unless its
 //     domain explicitly says otherwise.
-//
-// The reference implementation treats any cn marker anywhere in the domain or
-// issuer as decisive, so a genuinely ambiguous credential is classified cn
-// rather than being left unclassified.
 func variantForCredentials(creds *workBuddyCredentials) wbVariant {
-	override := state.settings.get().VariantOverride
-	if override == "ai" {
-		return variantAi
-	}
-	if override == "cn" {
-		return variantCn
-	}
 	if creds == nil {
 		return variantCn
 	}
@@ -101,6 +90,33 @@ func variantForCredentials(creds *workBuddyCredentials) wbVariant {
 		return variantCn
 	}
 	return variantCn
+}
+
+// variantAllowed reports whether a credential may be acted on given the current
+// override.
+//
+// This is what the 「版本切换」 selector actually controls:
+//
+//	auto  (empty) -> every account, so both channels work side by side;
+//	国内版        -> only credentials that resolve to cn;
+//	国际版        -> only credentials that resolve to ai.
+//
+// It never changes an account's resolved variant, so a mixed pool keeps working
+// when the selector is left on auto.
+func variantAllowed(creds *workBuddyCredentials) bool {
+	return variantAllowedFor(state.settings.get().VariantOverride, variantForCredentials(creds))
+}
+
+// variantAllowedFor is the pure form of variantAllowed, for tests and for
+// callers that already resolved the variant.
+func variantAllowedFor(override string, resolved wbVariant) bool {
+	switch override {
+	case "cn":
+		return resolved == variantCn
+	case "ai":
+		return resolved == variantAi
+	}
+	return true
 }
 
 // domainSaysCn reports whether the domain carries a positive domestic marker.

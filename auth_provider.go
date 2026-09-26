@@ -27,8 +27,16 @@ import (
 var workBuddyPendingLogins = newPendingLoginStore()
 
 // authIdentifier answers auth.identifier.
+//
+// CPA uses the value both to match the provider key and to label the OAuth
+// entry on the Auth page. Matching is case-insensitive host-side
+// (pluginhost/auth_provider.go: normalizeProviderID lowercases both sides), so
+// returning the display spelling fixes the label — "workbuddy" became
+// "WorkBuddy" — without changing which accounts are recognised.
+//
+// The routing key stays pluginName; see MethodFrontendAuthIdentifier.
 func authIdentifier() ([]byte, error) {
-	return okEnvelope(identifierResponse{Identifier: workBuddyProviderKey})
+	return okEnvelope(identifierResponse{Identifier: workBuddyDisplayName})
 }
 
 // authParse answers auth.parse: accept credential material the user pasted or
@@ -194,9 +202,14 @@ func authLoginStart(request []byte) ([]byte, error) {
 	}
 
 	// The realm decides which host issues the credential. A credential minted by
-	// one realm is rejected by the other, so the choice has to be made here
-	// rather than at request time.
-	variant := authVariantFromRequest(authVariantHint(req))
+	// one realm is rejected by the other, so the choice is made here rather than
+	// at request time.
+	//
+	// CPA exposes a single OAuth entry per plugin, so the version selector is
+	// carried in Metadata. When the operator has not chosen, the global
+	// 版本切换 setting decides; if that is left on 自动, the domestic channel is
+	// used and the response says how to reach the other one.
+	variant, explicit := authVariantResolve(req)
 
 	authURL, state, errStart := startWorkBuddyLogin(variant)
 	if errStart != nil {
@@ -213,6 +226,15 @@ func authLoginStart(request []byte) ([]byte, error) {
 		Variant:   variant,
 	})
 
+	// Spell out which channel this link belongs to and how to get the other, so
+	// the single entry point is still usable for a mixed pool.
+	hint := "在浏览器打开上面的链接并使用 " + variant.label() + " 账号登录。"
+	if explicit {
+		hint += "本次按你选择的方向签发凭据，登录后该账号只会走 " + variant.label() + " 的接口。"
+	} else {
+		hint += "当前未指定版本，按「版本切换」设置选择；如需另一个版本，请先在设置里切换，或再次点击授权并指定版本。"
+	}
+
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  workBuddyProviderKey,
 		URL:       authURL,
@@ -222,8 +244,11 @@ func authLoginStart(request []byte) ([]byte, error) {
 			"display_name":  workBuddyDisplayName,
 			"variant":       string(variant),
 			"variant_label": variant.label(),
-			"hint": "在浏览器打开上面的链接并使用 " + variant.label() +
-				" 账号登录，登录完成后此处会自动完成。该账号后续的签到、额度与成长任务都会调用同一版本的接口。",
+			"explicit":      explicit,
+			"other_variant": string(otherVariant(variant)),
+			"other_label":   otherVariant(variant).label(),
+			"auth_host":     authHostFor(variant),
+			"hint":          hint,
 		},
 	})
 }

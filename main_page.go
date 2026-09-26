@@ -212,59 +212,17 @@ func renderMainPage() string {
 				`登录完成后本列表会在数秒内自动出现该账号。</div>`)
 		}
 	} else {
-		b.WriteString(`<table><thead><tr>`)
-		b.WriteString(`<th>账号</th><th>UID</th><th>版本</th><th class="num">积分</th><th>到期</th><th>状态</th><th>操作</th></tr></thead><tbody>`)
-		for _, a := range accounts {
-			pillClass, statusText := "ok", "可用"
-			detail := ""
-			switch {
-			case a.Disabled:
-				pillClass, statusText = "bad", "已停用"
-				detail = a.Reason
-			case a.Expired:
-				pillClass, statusText = "bad", "凭据过期"
-				detail = "请重新登录"
-			case a.CreditsExpired:
-				pillClass, statusText = "bad", "积分过期"
-			case !a.CooldownUntil.IsZero() && time.Now().Before(a.CooldownUntil):
-				pillClass, statusText = "warn", "冷却中"
-				detail = a.CooldownUntil.Local().Format("15:04:05")
-			}
-			cv := "—"
-			if a.CreditsKnown {
-				cv = fmt.Sprint(a.Credits)
-			}
-			expiry, expiryClass := "—", "muted"
-			switch {
-			case a.CreditsExpired:
-				expiry, expiryClass = "已过期", "bad"
-			case a.CreditsExpireAt > 0 && a.CreditsExpiringSoon:
-				expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "warn"
-			case a.CreditsExpireAt > 0:
-				expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "muted"
-			}
-			b.WriteString(`<tr><td><strong>` + html.EscapeString(a.Label) + `</strong></td>`)
-			b.WriteString(`<td><code>` + html.EscapeString(firstNonEmpty(a.UID, a.AuthIndex)) + `</code></td>`)
-			b.WriteString(`<td><span class="pill idle">` + html.EscapeString(firstNonEmpty(a.VariantLabel, a.Variant, "—")) + `</span></td>`)
-			b.WriteString(`<td class="num">` + html.EscapeString(cv) + `</td>`)
-			b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
-			b.WriteString(`<td><span class="pill ` + pillClass + `">` + statusText + `</span>`)
-			if detail != "" {
-				b.WriteString(` <span class="muted small">` + html.EscapeString(detail) + `</span>`)
-			}
-			b.WriteString(`</td>`)
-			// enable/disable toggle
-			uid := firstNonEmpty(a.UID, a.AuthIndex)
-			if a.DisabledByUser {
-				b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
-					`onclick="toggleAccount('` + html.EscapeString(uid) + `','enable','` + html.EscapeString(a.AuthIndex) + `')">启用</button></td>`)
-			} else {
-				b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
-					`onclick="toggleAccount('` + html.EscapeString(uid) + `','disable','` + html.EscapeString(a.AuthIndex) + `')">禁用</button></td>`)
-			}
-			b.WriteString(`</tr>`)
-		}
-		b.WriteString(`</tbody></table>`)
+		// Grouped by realm. A mixed pool is the normal case now, and the two
+		// halves behave differently (no check-in internationally, no growth
+		// centre either), so showing one flat list hid which accounts a given
+		// feature would actually act on.
+		cnAccounts, aiAccounts := splitAccountsByVariant(accounts)
+		b.WriteString(`<div class="muted small" style="margin:.2rem 0 .6rem">共 ` +
+			fmt.Sprint(len(accounts)) + ` 个账号：国内版 ` + fmt.Sprint(len(cnAccounts)) +
+			` 个，国际版 ` + fmt.Sprint(len(aiAccounts)) + ` 个。` +
+			`「版本切换」为自动时两组都会参与调用；切换为某一版时仅该组参与。</div>`)
+		b.WriteString(renderAccountGroup("国内版账号", "cn", cnAccounts))
+		b.WriteString(renderAccountGroup("国际版账号", "ai", aiAccounts))
 	}
 	if warn := state.accounts.lastError(); warn != "" {
 		b.WriteString(`<div class="note bad">读取账号列表失败：` + html.EscapeString(warn) + `</div>`)
@@ -717,4 +675,87 @@ func handleAccountToggleRequest(req pluginapi.ManagementRequest) (managementResp
 		Headers:    jsonResponseHeaders(),
 		Body:       mustJSON(map[string]any{"ok": true}),
 	}, true
+}
+
+// renderAccountGroup draws one realm's accounts as a table.
+//
+// Each group states which features it serves, because they differ: check-in and
+// the growth centre exist only domestically, so an operator looking at an
+// international account should not expect those buttons to do anything.
+func renderAccountGroup(title, variantKey string, accounts []workBuddyAccount) string {
+	var b strings.Builder
+	b.WriteString(`<h3 style="margin:.9rem 0 .35rem;font-size:.95rem">` + html.EscapeString(title) +
+		` <span class="muted small">（` + fmt.Sprint(len(accounts)) + ` 个）</span></h3>`)
+
+	if variantKey == "ai" {
+		b.WriteString(`<div class="muted small" style="margin-bottom:.4rem">` +
+			`调用主机 www.workbuddy.ai。国际版没有签到，也没有成长任务中心；额度查询与对外调用可用。</div>`)
+	} else {
+		b.WriteString(`<div class="muted small" style="margin-bottom:.4rem">` +
+			`调用主机 copilot.tencent.com。签到、成长任务、猫猫旅行与额度查询均可用。</div>`)
+	}
+
+	if len(accounts) == 0 {
+		b.WriteString(`<div class="empty">该版本暂无账号。</div>`)
+		return b.String()
+	}
+
+	b.WriteString(`<table><thead><tr>`)
+	b.WriteString(`<th>账号</th><th>UID</th><th class="num">积分</th><th>到期</th><th>状态</th><th>操作</th></tr></thead><tbody>`)
+	for _, a := range accounts {
+		pillClass, statusText := "ok", "可用"
+		detail := ""
+		switch {
+		case a.AutoDisabled:
+			// Distinguished from a manual disable so the operator knows the
+			// pool retired it and can re-enable deliberately.
+			pillClass, statusText = "bad", "自动禁用"
+			detail = firstNonEmpty(a.DisabledReason, a.Reason)
+		case a.DisabledByUser || a.Disabled:
+			pillClass, statusText = "bad", "已停用"
+			detail = a.Reason
+		case a.Expired:
+			pillClass, statusText = "bad", "凭据过期"
+			detail = "请重新登录"
+		case a.CreditsExpired:
+			pillClass, statusText = "bad", "积分过期"
+		case !a.CooldownUntil.IsZero() && time.Now().Before(a.CooldownUntil):
+			pillClass, statusText = "warn", "冷却中"
+			detail = a.CooldownUntil.Local().Format("15:04:05")
+		}
+		cv := "—"
+		if a.CreditsKnown {
+			cv = fmt.Sprint(a.Credits)
+		}
+		expiry, expiryClass := "—", "muted"
+		switch {
+		case a.CreditsExpired:
+			expiry, expiryClass = "已过期", "bad"
+		case a.CreditsExpireAt > 0 && a.CreditsExpiringSoon:
+			expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "warn"
+		case a.CreditsExpireAt > 0:
+			expiry, expiryClass = fmt.Sprintf("%d 天后", a.CreditsExpireDays), "muted"
+		}
+		b.WriteString(`<tr><td><strong>` + html.EscapeString(a.Label) + `</strong></td>`)
+		b.WriteString(`<td><code>` + html.EscapeString(firstNonEmpty(a.UID, a.AuthIndex)) + `</code></td>`)
+		b.WriteString(`<td class="num">` + html.EscapeString(cv) + `</td>`)
+		b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
+		b.WriteString(`<td><span class="pill ` + pillClass + `">` + statusText + `</span>`)
+		if detail != "" {
+			b.WriteString(` <span class="muted small">` + html.EscapeString(detail) + `</span>`)
+		}
+		b.WriteString(`</td>`)
+
+		uid := firstNonEmpty(a.UID, a.AuthIndex)
+		if a.DisabledByUser || a.Disabled || a.AutoDisabled {
+			b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
+				`onclick="toggleAccount('` + html.EscapeString(uid) + `','enable','` + html.EscapeString(a.AuthIndex) + `')">启用</button></td>`)
+		} else {
+			b.WriteString(`<td><button type="button" class="ghost" style="padding:3px 10px;font-size:.78rem" ` +
+				`onclick="toggleAccount('` + html.EscapeString(uid) + `','disable','` + html.EscapeString(a.AuthIndex) + `')">禁用</button></td>`)
+		}
+		b.WriteString(`</tr>`)
+	}
+	b.WriteString(`</tbody></table>`)
+	return b.String()
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // This file ports WorkBuddy / CodeBuddy (Tencent) authentication from
@@ -170,27 +172,45 @@ func authHostFor(variant wbVariant) string {
 	return copilotHostValue()
 }
 
-// authVariantFromRequest resolves the variant a login request asks for.
+// authVariantResolve picks the realm for a login request.
 //
-// CPA may pass the choice through the request's provider-ish fields; the plugin
-// also honours its own variant_override setting so an operator who forced
-// 「国际版」 gets an international login link without passing anything. An
-// explicit value always wins so a single account can be added for the other
-// realm while an override is active.
-func authVariantFromRequest(explicit string) wbVariant {
-	switch strings.ToLower(strings.TrimSpace(explicit)) {
+// Returns the chosen variant and whether the caller asked for it explicitly.
+// An explicit choice wins so a single account can be added for the other realm
+// while the global selector points elsewhere; otherwise the selector decides,
+// and 自动 falls back to the domestic channel (the login entry that exists for
+// both realms cannot be guessed, and cn is the one the majority of users need).
+func authVariantResolve(req pluginapi.AuthLoginStartRequest) (wbVariant, bool) {
+	if hint := authVariantHint(req); hint != "" {
+		if variant, ok := parseVariant(hint); ok {
+			return variant, true
+		}
+	}
+	if variant, ok := parseVariant(state.settings.get().VariantOverride); ok {
+		return variant, false
+	}
+	return variantCn, false
+}
+
+// parseVariant maps a user-facing spelling to a variant.
+//
+// Returns ok=false for "" (自动) and for anything unrecognised, so callers can
+// tell "no preference" from "a preference we do not understand".
+func parseVariant(text string) (wbVariant, bool) {
+	switch strings.ToLower(strings.TrimSpace(text)) {
 	case "ai", "intl", "global", "international", "国际", "国际版":
-		return variantAi
+		return variantAi, true
 	case "cn", "china", "domestic", "国内", "国内版":
+		return variantCn, true
+	}
+	return "", false
+}
+
+// otherVariant returns the opposite realm.
+func otherVariant(v wbVariant) wbVariant {
+	if v == variantAi {
 		return variantCn
 	}
-	switch strings.ToLower(strings.TrimSpace(state.settings.get().VariantOverride)) {
-	case "ai":
-		return variantAi
-	case "cn":
-		return variantCn
-	}
-	return variantCn
+	return variantAi
 }
 
 // startWorkBuddyLogin asks a host for a device-code state.

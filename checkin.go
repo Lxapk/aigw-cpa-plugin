@@ -113,15 +113,66 @@ type checkinAccount struct {
 // The host exposes the auth-file inventory through host.auth.list; each entry's
 // storage is read with host.auth.get. Credentials we cannot parse are skipped
 // rather than failing the whole run.
-// collectCheckinAccounts enumerates the credentials this plugin owns.
+// selectActionableAccounts filters an inventory down to the accounts a batch
+// operation may touch.
 //
-// This is the single inventory used by the check-in pass, the quota refresh and
-// the task engine, so its filter decides what "this plugin's accounts" means
-// everywhere. It must therefore use the same strict rule as the panel's account
-// list (isWorkBuddyAuthEntry); an earlier version tested only provider/type,
-// which disagreed with the panel whenever a host exposed a credential solely
-// through its file name — the account showed up in the list but was missing
-// from quota totals and check-in.
+// The version selector scopes the work:
+//
+//	auto  -> every enabled account, so a pool holding both 国内版 and 国际版
+//	         credentials is fully served in one pass;
+//	国内版 -> only cn credentials;
+//	国际版 -> only ai credentials.
+//
+// It never re-labels an account; each one still routes to the host that issued
+// its token.
+func selectActionableAccounts(accounts []checkinAccount) []checkinAccount {
+	out := make([]checkinAccount, 0, len(accounts))
+	for _, account := range accounts {
+		if !variantAllowed(account.Creds) {
+			continue
+		}
+		out = append(out, account)
+	}
+	return out
+}
+
+// collectActionableAccounts is the batch-operation entry point.
+func collectActionableAccounts() ([]checkinAccount, error) {
+	accounts, errCollect := collectCheckinAccounts()
+	if errCollect != nil {
+		return nil, errCollect
+	}
+	return selectActionableAccounts(accounts), nil
+}
+
+// splitAccountsByVariant groups an inventory for display.
+//
+// The panel shows both groups with their own counts, because a mixed pool is
+// now the normal case and the two halves behave differently (an international
+// account has no check-in, for instance).
+func splitAccountsByVariant(accounts []workBuddyAccount) (cn, ai []workBuddyAccount) {
+	for _, account := range accounts {
+		if account.Variant == string(variantAi) {
+			ai = append(ai, account)
+		} else {
+			cn = append(cn, account)
+		}
+	}
+	return cn, ai
+}
+
+// collectCheckinAccounts enumerates every credential this plugin owns.
+//
+// This is the single inventory used by the panel, the check-in pass, the quota
+// refresh and the task engine, so it deliberately does NOT apply the version
+// selector: the account list must show a mixed pool in full. Callers that act
+// on accounts filter through selectActionableAccounts, which honours the
+// selector without changing how any account is routed.
+//
+// Inclusion rule (isWorkBuddyAuthEntry) is the same one the panel uses. An
+// earlier version tested only provider/type, which disagreed with the panel
+// whenever a host exposed a credential solely through its file name — the
+// account showed up in the list but was missing from quota totals and check-in.
 func collectCheckinAccounts() ([]checkinAccount, error) {
 	raw, errList := callHost("host.auth.list", map[string]any{})
 	if errList != nil {
@@ -208,7 +259,20 @@ func runCheckin(trigger string) *checkinRun {
 
 	run := &checkinRun{StartedAt: time.Now(), Trigger: trigger}
 
-	accounts, errCollect := collectCheckinAccounts()
+	// Check-in exists only for the domestic realm. Enumerate everything so
+	// international credentials can be reported as an explicit skip, but only
+	// act on the accounts the version selector allows — otherwise the totals
+	// would silently omit half a mixed pool.
+	allAccounts, errCollect := collectCheckinAccounts()
+	if errCollect != nil {
+		run.FinishedAt = time.Now()
+		run.Results = []checkinResult{{Error: "读取账号失败: " + errCollect.Error()}}
+		run.Total = 1
+		run.Failed = 1
+		state.checkin.record(run)
+		return run
+	}
+	accounts := selectActionableAccounts(allAccounts)
 	if errCollect != nil {
 		run.FinishedAt = time.Now()
 		run.Results = []checkinResult{{Error: "读取账号失败：" + errCollect.Error()}}

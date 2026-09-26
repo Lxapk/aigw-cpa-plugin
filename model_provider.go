@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -207,11 +208,24 @@ func modelsToInfo(models []workBuddyModel) []pluginapi.ModelInfo {
 	return out
 }
 
-// isWorkBuddyProvider accepts both the internal key and the display name.
+// isWorkBuddyProvider reports whether a provider/type field names this plugin.
+//
+// The comparison is case-insensitive on purpose. CPA takes the value returned by
+// auth.identifier, lower-cases it (pluginhost/auth_provider.go normalizes both
+// the value it passes to auth.parse and the one it writes into the auth file),
+// and can therefore record "workbuddy" where this plugin was created under
+// "codebuddy". A case-sensitive switch silently stopped recognising the plugin's
+// own accounts once the label became "WorkBuddy".
 func isWorkBuddyProvider(name string) bool {
-	switch name {
-	case workBuddyProviderKey, workBuddyDisplayName:
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case workBuddyProviderKey, workBuddyDisplayNameLower:
 		return true
 	}
 	return false
 }
+
+// workBuddyDisplayNameLower is the persisted form of the display name: CPA
+// lower-cases whatever auth.identifier returned before storing it. It coincides
+// with pluginName, which is why the routing key must not be returned from
+// auth.identifier.
+const workBuddyDisplayNameLower = "workbuddy"

@@ -94,9 +94,10 @@ func workBuddyRegionForCredentials(creds *workBuddyCredentials) string {
 // fetchQuotaForAccounts queries quota for every WorkBuddy credential.
 //
 // It reuses the same account enumeration as the check-in pass so both features
-// always agree on which credentials exist.
+// always agree on which credentials exist, and applies the version selector so
+// 「国内版」/「国际版」 scope the refresh without re-labelling anything.
 func fetchQuotaForAccounts() ([]quotaRefreshResult, error) {
-	accounts, errCollect := collectCheckinAccounts()
+	accounts, errCollect := collectActionableAccounts()
 	if errCollect != nil {
 		return nil, errCollect
 	}
