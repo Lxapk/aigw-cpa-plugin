@@ -39,6 +39,13 @@ jobs:
       - name: Test
         run: CGO_ENABLED=0 go test ./... -count=1
 
+      # The plugin store reads the registry from the repository, so a bad value
+      # here breaks installation for everyone. A placeholder sha256 is the worst
+      # case: the store rejects it outright with "invalid sha256 length", which
+      # is what happened when "PENDING" was committed as a stand-in.
+      - name: Validate registry.json
+        run: python3 scripts/validate_registry.py
+
       - name: Build .so (c-shared)
         env: {CGO_ENABLED: "1", CC: gcc, GOOS: linux, GOARCH: amd64}
         run: |
