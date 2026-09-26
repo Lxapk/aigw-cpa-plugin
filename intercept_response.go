@@ -48,7 +48,12 @@ func interceptResponse(request []byte) ([]byte, error) {
 			// than merely cooled down. Everything else (429, quota exhaustion,
 			// 5xx) is recoverable and keeps its cooldown.
 			permanent := isPermanentFailure(statusCode, upErr)
-			autoDisabled = state.pool.failure(ctx.Provider, ctx.UID, upErr.Kind, upErr.Message, state.settings.get(), permanent)
+			// Pass the model so a throttle parks only the model that was asked
+			// for. The upstream reports it per model and tells the caller to
+			// switch, so benching the account would also disable the models that
+			// still work.
+			autoDisabled = state.pool.failureForModel(ctx.Provider, ctx.UID, failedModelName(ctx),
+				upErr.Kind, upErr.Message, state.settings.get(), permanent)
 		}
 		errorText := upstreamErrText(upErr)
 		if autoDisabled {
@@ -130,11 +135,26 @@ func interceptStreamChunk(request []byte) ([]byte, error) {
 	if msg := extractStreamError(payload); msg != "" {
 		if ctx.Provider != "" {
 			upErr := classifyUpstream(http.StatusBadGateway, []byte(msg))
-			state.pool.failure(ctx.Provider, ctx.UID, upErr.Kind, upErr.Message, state.settings.get(), false)
+			// Stream errors carry the same per-model throttle text, so scope the
+			// cooldown the same way instead of benching the whole account.
+			state.pool.failureForModel(ctx.Provider, ctx.UID, failedModelName(ctx),
+				upErr.Kind, upErr.Message, state.settings.get(), false)
 		}
 	}
 
 	return okEnvelope(pluginapi.StreamChunkInterceptResponse{})
+}
+
+// failedModelName picks the model id to attribute a failure to.
+//
+// RequestedModel is what the client asked for; Model is what the request was
+// resolved to. The cooldown has to be keyed by the name the *router* will look up
+// on the next attempt, which is the requested one, so it wins when both are set.
+func failedModelName(ctx requestContext) string {
+	if model := strings.TrimSpace(ctx.RequestedModel); model != "" {
+		return model
+	}
+	return strings.TrimSpace(ctx.Model)
 }
 
 // upstreamErrText renders the same shape the app logged, e.g.

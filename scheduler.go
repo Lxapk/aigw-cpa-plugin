@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -134,6 +136,13 @@ type schedulerCandidate struct {
 	Known    bool
 	Cooldown time.Time
 	HasCool  bool
+	// ModelCooled marks a candidate that is parked for the requested model only.
+	// It stays a candidate so the pick can fall through to the next one; if every
+	// candidate ends up parked for this model, the caller reports that instead of
+	// silently answering from a model the upstream is throttling.
+	ModelCooled    bool
+	ModelCoolUntil time.Time
+	ModelCoolModel string
 }
 
 // collectCandidates ports A0/s.java:596's availability guard and folds in the
@@ -184,6 +193,15 @@ func (s *schedulerState) collectCandidates(req pluginapi.SchedulerPickRequest) [
 				if lane.UID != c.ID && laneKey(lane.Provider, lane.UID) != c.ID {
 					continue
 				}
+				// A model-scoped throttle parks only that model: the account is
+				// still a valid candidate for every other model, and skipping it
+				// here is what lets a throttled deepseek-v4.1-flash fall through to
+				// an account that can still serve it.
+				if until, cooled := lane.modelCooled(req.Model, now); cooled {
+					cand.ModelCooled = true
+					cand.ModelCoolUntil = until
+					cand.ModelCoolModel = req.Model
+				}
 				// Respect a pool-level cooldown even if the host does not know
 				// about it (the pool sees failures the host does not).
 				if !lane.CooldownUntil.IsZero() && now.Before(lane.CooldownUntil) {
@@ -202,7 +220,77 @@ func (s *schedulerState) collectCandidates(req pluginapi.SchedulerPickRequest) [
 		}
 		out = append(out, cand)
 	}
+
+	// Drop candidates parked for this specific model, so the pick falls through
+	// to an account that can still serve it. Done as a second pass so that when
+	// *every* candidate is parked for this model the list comes back empty — the
+	// caller turns that into "no account can serve this model right now" rather
+	// than answering from an account the upstream is throttling.
+	if strings.TrimSpace(req.Model) != "" {
+		servable := out[:0]
+		for _, cand := range out {
+			if cand.ModelCooled {
+				continue
+			}
+			servable = append(servable, cand)
+		}
+		out = servable
+	}
 	return out
+}
+
+// modelCooledForRequest reports, for a request whose candidates all came back
+// parked, which model is cooling and until when. Used to explain the failure
+// instead of returning a bare "no account".
+func (s *schedulerState) modelCooledForRequest(req pluginapi.SchedulerPickRequest) (time.Time, bool) {
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		return time.Time{}, false
+	}
+	now := time.Now()
+	var earliest time.Time
+	for _, c := range req.Candidates {
+		if c.ID == "" {
+			continue
+		}
+		for _, lane := range state.pool.snapshot() {
+			if lane.UID != c.ID && laneKey(lane.Provider, lane.UID) != c.ID {
+				continue
+			}
+			until, cooled := lane.modelCooled(model, now)
+			if !cooled {
+				break
+			}
+			if earliest.IsZero() || until.Before(earliest) {
+				earliest = until
+			}
+			break
+		}
+	}
+	if earliest.IsZero() {
+		return time.Time{}, false
+	}
+	return earliest, true
+}
+
+// humanizeUntil renders a cooldown expiry as a short relative phrase plus the
+// wall-clock instant, e.g. "4 分 30 秒后（20:03:46）".
+func humanizeUntil(until time.Time) string {
+	remaining := time.Until(until)
+	if remaining <= 0 {
+		return "已恢复"
+	}
+	remaining = remaining.Round(time.Second)
+	var phrase string
+	switch {
+	case remaining >= time.Hour:
+		phrase = fmt.Sprintf("%d 小时 %d 分钟后", int(remaining.Hours()), int(remaining.Minutes())%60)
+	case remaining >= time.Minute:
+		phrase = fmt.Sprintf("%d 分 %d 秒后", int(remaining.Minutes()), int(remaining.Seconds())%60)
+	default:
+		phrase = fmt.Sprintf("%d 秒后", int(remaining.Seconds()))
+	}
+	return fmt.Sprintf("%s（%s）", phrase, until.Format("15:04:05"))
 }
 
 // triedAuthSet reads the already-attempted auth ids from scheduler metadata.
@@ -319,6 +407,19 @@ func schedulerPick(request []byte) ([]byte, error) {
 
 	candidates := state.scheduler.collectCandidates(req)
 	if len(candidates) == 0 {
+		// All candidates may have been parked for this model specifically. Say so,
+		// because "handled: false" sends the request back to the host, which then
+		// retries the same throttled account and surfaces a bare "no auth
+		// available" with no hint about when it clears.
+		if until, cooled := state.scheduler.modelCooledForRequest(req); cooled {
+			state.log.add(callRecord{
+				ProviderID: req.Provider,
+				Model:      req.Model,
+				StatusCode: http.StatusTooManyRequests,
+				Error: fmt.Sprintf("模型 %s 已被上游限流，%s 后恢复；其他模型不受影响",
+					req.Model, humanizeUntil(until)),
+			})
+		}
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -87,6 +90,17 @@ type credentialLane struct {
 	CooldownUntil time.Time `json:"cooldown_until"`
 	// CoolKind mirrors W1.d.f3834j.
 	CoolKind coolKind `json:"cool_kind"`
+	// ModelCooldowns parks individual models without benching the account.
+	//
+	// The upstream throttles per model and says so in its own wording
+	// ("您也可以切换其他模型继续使用"), but a lane-level cooldown takes the whole
+	// account out of rotation, so one throttled model would knock out the models
+	// that still work. Keyed by model id, valued with the expiry instant.
+	ModelCooldowns map[string]time.Time `json:"model_cooldowns,omitempty"`
+	// ModelCoolKinds records why each model was parked, for the panel.
+	ModelCoolKinds map[string]coolKind `json:"model_cool_kinds,omitempty"`
+	// ModelCoolReasons keeps the upstream wording, for the panel.
+	ModelCoolReasons map[string]string `json:"model_cool_reasons,omitempty"`
 	// LastError is the most recent failure reason.
 	LastError string `json:"last_error"`
 	// LastUsed is the most recent successful use.
@@ -429,12 +443,143 @@ const (
 	failureTransient
 )
 
-// failure ports A0.s.p(...) plus V1.k.c(): applies the correct cooldown for the
-// failure class and parks the lane permanently once `disabled` is signalled.
+// resetTimePattern finds "将在 <timestamp> 重置" / "resets at <timestamp>".
+var resetTimePattern = regexp.MustCompile(
+	`(?:将在|将于|重置时间[:：]?|resets?\s+(?:at|on)?)\s*([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2})(?:\s*(?:UTC|GMT)\s*([-+])?\s*([0-9]{1,2})(?::([0-9]{2}))?)?`)
+
+// parseUpstreamResetTime pulls the reset instant out of an upstream message.
 //
+// The hint is worth honouring: a fixed cooldown either releases the model while
+// it is still throttled (every retry fails) or keeps it parked after it recovered
+// (a working model sits idle). Returns false when no timestamp is present, which
+// leaves the configured cooldown in charge.
+//
+// The offset is applied by hand rather than through a Go layout. The upstream
+// writes "UTC+8", but time.Parse's Z07:00/Z0700 escapes only accept the colon and
+// two-digit spellings ("+08:00", "+0800"), so no single layout covers it.
+func parseUpstreamResetTime(message string, loc *time.Location) (time.Time, bool) {
+	match := resetTimePattern.FindStringSubmatch(message)
+	if len(match) < 2 {
+		return time.Time{}, false
+	}
+	stamp := strings.TrimSpace(match[1])
+
+	base := time.Time{}
+	var parsed bool
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if candidate, errParse := time.Parse(layout, stamp); errParse == nil {
+			base, parsed = candidate, true
+			break
+		}
+	}
+	if !parsed {
+		return time.Time{}, false
+	}
+
+	if len(match) < 4 || strings.TrimSpace(match[3]) == "" {
+		// No offset given: read the stamp as wall-clock time in the server's zone,
+		// which is how the Chinese wording is meant.
+		return time.Date(base.Year(), base.Month(), base.Day(),
+			base.Hour(), base.Minute(), base.Second(), 0, loc), true
+	}
+
+	sign := 1
+	if match[2] == "-" {
+		sign = -1
+	}
+	hours := 0
+	if _, errScan := fmt.Sscanf(match[3], "%d", &hours); errScan != nil {
+		return time.Time{}, false
+	}
+	minutes := 0
+	if len(match) > 4 && match[4] != "" {
+		_, _ = fmt.Sscanf(match[4], "%d", &minutes)
+	}
+	offset := sign * (hours*3600 + minutes*60)
+
+	// The stamp is local time at that offset; convert to UTC.
+	return time.Date(base.Year(), base.Month(), base.Day(),
+		base.Hour(), base.Minute(), base.Second(), 0, time.UTC).
+		Add(-time.Duration(offset) * time.Second), true
+}
+
+// parkModelLocked parks one model on one lane.
+//
+// The expiry is derived from the upstream's own reset hint when it gives one
+// ("将在 2026-09-27 20:03:46 UTC+8 重置"), because a fixed cooldown either gives up
+// too early (wasting a working account) or too late. Falls back to the configured
+// rate cooldown when no hint is present, capped so a misparsed date cannot park a
+// model indefinitely.
+func (p *credentialPool) parkModelLocked(lane *credentialLane, model string, kind coolKind, reason string, now time.Time, settings gatewaySettings) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+
+	until := now.Add(time.Duration(settings.RateCooldownMillis) * time.Millisecond)
+	if hinted, okHint := parseUpstreamResetTime(reason, now.Location()); okHint {
+		// A hint that is already in the past means the upstream's clock and ours
+		// disagree; a short cooldown is the safer reading than "not throttled".
+		if hinted.After(now) {
+			until = hinted
+		}
+	}
+	// Never park longer than the hard quota cooldown: a throttled model coming
+	// back is the normal case, and a bad parse must not look like dead credit.
+	if maxPark := now.Add(time.Duration(settings.QuotaCooldownMillis) * time.Millisecond); until.After(maxPark) {
+		until = maxPark
+	}
+
+	if lane.ModelCooldowns == nil {
+		lane.ModelCooldowns = make(map[string]time.Time)
+	}
+	if lane.ModelCoolKinds == nil {
+		lane.ModelCoolKinds = make(map[string]coolKind)
+	}
+	if lane.ModelCoolReasons == nil {
+		lane.ModelCoolReasons = make(map[string]string)
+	}
+	lane.ModelCooldowns[model] = until
+	lane.ModelCoolKinds[model] = kind
+	lane.ModelCoolReasons[model] = reason
+	lane.LastError = reason
+	lane.Failures++
+}
+
+// modelCooled reports whether a lane currently has this model parked, and until
+// when. An empty model (caller does not know it) is never considered parked, so
+// the caller falls back to the lane-level cooldown.
+func (lane *credentialLane) modelCooled(model string, now time.Time) (time.Time, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" || len(lane.ModelCooldowns) == 0 {
+		return time.Time{}, false
+	}
+	until, okFound := lane.ModelCooldowns[model]
+	if !okFound {
+		return time.Time{}, false
+	}
+	if !now.Before(until) {
+		// Expired; the entry is left in place so the panel can still show what
+		// happened, and is ignored from here on.
+		return time.Time{}, false
+	}
+	return until, true
+}
+
 // Returns whether the lane was actually retired by this call, so the caller can
 // log the retirement once instead of inferring it.
+//
+// model is the model id the failed request asked for, and may be empty when the
+// caller does not know it. When it is known and the failure is a throttle, only
+// that model is parked — the upstream's own message invites switching models, and
+// benching the account would also disable the models that still work.
 func (p *credentialPool) failure(provider, uid string, kind failureKind, reason string, settings gatewaySettings, permanent bool) bool {
+	return p.failureForModel(provider, uid, "", kind, reason, settings, permanent)
+}
+
+// failureForModel is failure with the model id, so a throttle can be scoped to
+// one model instead of the whole account.
+func (p *credentialPool) failureForModel(provider, uid, model string, kind failureKind, reason string, settings gatewaySettings, permanent bool) bool {
 	if provider == "" || uid == "" {
 		return false
 	}
@@ -473,6 +618,16 @@ func (p *credentialPool) failure(provider, uid string, kind failureKind, reason 
 
 	switch kind {
 	case failureAuth, failureRate, failureQuota:
+		// A throttle is scoped to the model that was asked for when the caller
+		// knows which one it was: the upstream reports it per model and tells the
+		// caller to switch models, so benching the account would take out the
+		// models that are still fine. Quota exhaustion and auth failures are not
+		// model-specific and keep the lane-level cooldown.
+		if kind == failureRate && strings.TrimSpace(model) != "" {
+			p.parkModelLocked(lane, model, coolKindRate, reason, now, settings)
+			return false
+		}
+
 		// V1.k.c() cases 0,1,3: immediate hard cooldown.
 		// The app labels a quota/rate rejection as QUOTA
 		// (V1/k.java:164 passes W1.b.f3822d with quotaCooldownMillis).

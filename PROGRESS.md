@@ -1,114 +1,81 @@
-# PROGRESS — AI 聚合网关反代功能 → CLIProxyAPI 插件
+# 进行中：限流识别 + 按模型冷却（v0.13.29）
 
 ## 目标
-从 `/sdcard/AI 聚合网关_0.1.18.apk` 提取「反向代理」功能实现，写成 CLIProxyAPI (CPA) 插件。
 
-## 源 APK 逆向结论（已完成）
+1. 正确识别上游限流（上游用 502/server_error 返回，非 429）
+2. 限流只冷却**出问题的模型**，账号对其他模型仍可用
+3. 冷却到上游给出的重置时刻
 
-APK 真实路径：`/sdcard/AI 聚合网关_0.1.18.apk`（用户最初给的 `/storage/emulated/0/...` 不存在）
-md5: `17f8cc23ad0196ddf00c61237793221e`
-包名：`dev.aigw.app`
-反编译产物：`/workspace/ai_gw/jadxout/`（JADX）+ `/workspace/ai_gw/dec/`（apktool smali）
+## 已完成
 
-核心类：
-| 类 | 作用 |
-|---|---|
-| `V1/o` extends `h2.AbstractC0573l` (NanoHTTPD) | 网关 HTTP 服务器；`e(Session)` 路由，`j(Session)` 鉴权，`k(Session)` 反代主算法 |
-| `V1/k` | 网关引擎（provider 注册表 + 账号池 + 记账 `r()`） |
-| `V1/s` | GatewaySettings |
-| `V1/z` | ProxySettings（出站 HTTP 代理，与「反代」无关） |
-| `V1/A` | Route(providerId, model) |
-| `V1/n` | 账号条目（b=uid, c=label, e=disabled, g=statusMessage） |
-| `V1/C` | 手写 chunked SSE 响应器 + 15s keep-alive |
-| `V1/m` | 流泵 |
-| `A0.s` | 账号池健康态（t() 选号、p() 记失败、q() 记成功） |
+### 限流识别（rpc.go）
+- 上游真实响应：`HTTP 502` + `{"type":"server_error","code":"internal_server_error"}` + 中文文案
+- 新增 `rateLimitPhrases` / `quotaPhrases` / `containsAnyFold`
+- `classifyUpstream` 在 `statusCode >= 500` 与 `default` 分支检查文案
+- 测试：`TestRateLimitDetectedFromChineseMessage` 等 6 项通过
 
-路由：`POST /v1/chat/completions`（反代入口）、`GET /v1/models`、`GET /healthz`、`GET /authorize`
-响应统一 CORS：`Access-Control-Allow-Origin: *` / `Methods: GET,POST,OPTIONS` / `Headers: *`
-错误信封：`{"error":{"message","type":"api_error","code"}}`
+### 按模型冷却（pool.go）
+- `credentialLane` 加 `ModelCooldowns` / `ModelCoolKinds` / `ModelCoolReasons`
+- `failureForModel(...)` 在 `kind == failureRate && model != ""` 时只停该模型
+- `parkModelLocked` / `lane.modelCooled`
+- 测试：`TestThrottleParksOnlyThatModel` 等 5 项通过
+- **实测已验证**：deepseek-v4.1-flash 受限后 deepseek-v4-pro 正常返回，账号级冷却为零值
 
-`V1/s` GatewaySettings 默认值（已在插件中 1:1 复刻）：
-```
-port=8790  apiKey=""  allowNoKey=true  exposeLan=true  onlyUsableModels=false
-refreshSkewSeconds=86400  maxRotate=3
-quotaCooldownMillis=43200000(12h)  softCooldownMillis=60000(60s)
-errorThreshold=3  errorCooldownMillis=600000(10m)
-logRetentionDays=30  defaultProvider="trae"
-```
+### 重置时间解析（pool.go）
+- `resetTimePattern` + `parseUpstreamResetTime`
+- 注意：Go 的 `Z07:00` layout 不认 `UTC+8`（只认 `+08:00`/`+0800`），已改为手动算偏移
+- 上限受 `QuotaCooldownMillis` 约束；提示已过期则回退配置值
 
-`V1/o.j()` 鉴权：`allowNoKey` 短路 → `apiKey` 为空则拒 → 要求 `Bearer `（忽略大小写）前缀 → `MessageDigest.isEqual` 常量时间比较。
+### 流式架构修复（executor.go，v0.13.28 已发布）
+- 异步 `go pumpUpstreamStreamIntoHost`，立即返回
+- 原因：宿主 emit 缓冲只有 16 槽，消费方要等 executor 返回后才启动 → 同步实现第 17 块卡死
+- `stream_id` 必填、初始 header `text/event-stream`、panic 恢复（对齐官方示例）
 
-`V1/o.k()` 反代算法：
-1. 鉴权失败 → 401 `invalid_api_key`
-2. 读 body（chunked / content-length，上限 8MB，8KB buffer）；空 → 400「请求体为空」；非 JSON → 400「请求体不是合法 JSON」
-3. 取 `stream`、`model`
-4. 路由：`model` 含 `/` 且 `indexOf('/')>0` → 显式 `provider/model`；否则用 `defaultProvider`；再退到第一个可用 provider；都没有 → 400「缺少 model 参数」
-5. 未知 provider → 400「未知供应商：xxx」
-6. `provider.k(model)` 模型映射，**重写 body 的 model 字段**
-7. 循环 `maxRotate` 次：`A0.s.t(providerId, tried)` 选号 → `provider.c(auth, skew)` 刷新凭据 → `provider.b(auth, body)` 发起上游 → `>=400` 则 `V1.k.c()` 分类记账并换号
-8. 流式 → `V1/m` 流泵 + `V1/C` 手写 chunked SSE；非流式 → `provider.k()` 全文 + 解析 usage
-9. 全失败 → 503 `no_healthy_account`；成功 → `A0.s.q()` 清错误计数
+### 面板可见性（accounts.go）
+- `workBuddyAccount` 加 `Cooldown` / `ModelCooldowns` / `ModelCoolReasons` / `LastError` / `Failures`
+- `formatModelCooldowns` 填充
 
-`V1/k.c()` 失败分类 → 冷却：
-- case 0/1/3（auth/rate/quota）→ 立即硬冷却 `quotaCooldownMillis`
-- case 2 → 永久停用（`disabled=true`）
-- case 4/5/6（transient）→ 累计连续失败，达 `errorThreshold` 才停 `errorCooldownMillis`，否则只是 `softCooldownMillis`
+## 进行中（未完成）
 
-## CPA 插件体系结论（已完成）
+**疑点**：实测 8561 端口显示 `model_cooldowns=None` 且 `usable=False`（走了账号级冷却），
+但单元测试 `TestInterceptResponseParksModelNotAccount` 走真实拦截路径**通过**
+（`ModelCooldowns = map[deepseek-v4.1-flash:...]`，`CooldownUntil` 为零值）。
 
-仓库：`/workspace/cliproxyapi_ref`（CLIProxyAPI v7，module `github.com/router-for-me/CLIProxyAPI/v7`，要求 Go 1.26）
+### 已做的排查
+- `ResponseInterceptRequest` 有 `Model` / `RequestedModel` 字段，CPA 原生提供
+- `interceptResponse` 已把 `req.Model` 传给 `resolveContext`
+- `failedModelName(ctx)` 优先 `RequestedModel`，回退 `Model`
+- `inflight.put` 只在 `intercept_response.go:125`（流式路径）
+- 已加 `[WB-DIAG]` 诊断打印到 `intercept_response.go` 的失败分支
+- 已构建并部署到 `/tmp/cpa/run/plugins/workbuddy.so`
+- 已重启 CPA，**端口 8571**，进程 id `cpa-diag`
 
-- 插件 = **原生 C-ABI 动态库 .so**，dlopen 加载
-- 导出符号：`cliproxy_plugin_init(host*, plugin*)` / `cliproxyPluginCall(method, req, len, resp)` / `cliproxyPluginFree` / `cliproxyPluginShutdown`
-- ABIVersion=1，SchemaVersion=6
-- 发现规则：`plugins/<goos>/<goarch>/<id>[-v<ver>].so` 或 `plugins/<id>.so`
-- 配置：`config.yaml` → `plugins.enabled/dir` + `plugins.configs.<id>.{enabled,priority,...}`
-- RPC 信封：`{"ok":true,"result":...}` / `{"ok":false,"error":{code,message,http_status,retryable}}`
-- 关键方法：`plugin.register/reconfigure/quiesce/shutdown`、`frontend_auth.identifier/authenticate`、
-  `request.intercept_before/after`、`response.intercept_after`、`response.intercept_stream_chunk`、
-  `usage.handle`、`management.register/handle`、`host.log`、`host.auth.*`
-- 参考骨架：`examples/plugin/simple/go/main.go`
+### 下一步
+1. `process(action=logs, id=cpa-diag)` 取日志，找 `[WB-DIAG]`
+2. 发一次会失败的请求触发诊断：
+   ```
+   curl -sS -X POST http://127.0.0.1:8571/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":5}'
+   ```
+3. 看 `model=` / `requested=` / `ctxModel=` 的实际值，定位为何实测路径缺 model
+4. 修根因 → 删除诊断代码 → 全量测试 → 实测复验
+5. 发布 v0.13.29
 
-## 插件工程（已完成实现 + 编译通过）
+## 环境备忘
 
-路径：`/workspace/aigw-cpa-plugin`
-模块：`github.com/taixu/aigw-reverse-proxy`（replace → `../cliproxyapi_ref`）
-产物：`dist/aigw-reverse-proxy.so`（7.5MB，c-shared，仅依赖 libc/libresolv）
-ABI 符号已用 `nm -D` 验证导出。
+- 本地 CPA 源码：`/tmp/cpa/CLIProxyAPI`
+- 运行目录：`/tmp/cpa/run`（`config.yaml` 的 `port` 每次改以绕开旧进程）
+- 测试账号：`codebuddy` 国内 + 国际各一，**国内被上游限流到 2026-09-27 20:03:46 UTC+8**
+- 官方参考：`examples/plugin/claude-web-search-router/go/execute_stream.go`（异步流式权威写法）
+- 推送到 GitHub：本地代理 7890 常掉线，**改用真实 IP 绕过 fake-ip DNS**
+  ```
+  git -c http.curloptResolve="github.com:443:140.82.112.4" push origin main
+  ```
+- 发版流程：改 `pluginVersion` → 提交 → tag → CI → 取 sha256 写 registry.json → 提交推送
+- 构建插件：`CGO_ENABLED=1 CC=gcc GOOS=linux GOARCH=arm64 go build -buildmode=c-shared -trimpath -o /tmp/cpa/run/plugins/workbuddy.so .`
 
-| 文件 | 内容 | 源 APK 对应 |
-|---|---|---|
-| `cabi.go` | C ABI + dlopen 入口 | — |
-| `rpc.go` | RPC 分发 + 注册元数据 + 错误分类 | — |
-| `settings.go` | gatewaySettings + 默认值 + YAML 解码 | `V1/s` |
-| `routing.go` | `resolveRoute` + `rewriteModelBody` | `V1/o.k()` step 6-8 |
-| `frontendauth.go` | 常量时间 Bearer 校验 | `V1/o.j()` |
-| `pool.go` | 账号池 + 冷却策略 + 轮换选号 | `A0.s` + `V1/k.c()` |
-| `intercept_request.go` | 路由改写 + 头戳记 | `V1/o.k()` |
-| `intercept_response.go` | 失败分类 + 记账 | `V1/o.k()` step 9 + `V1/o.r()` |
-| `stream.go` | SSE 解析 + usage 累计 | `V1/o.p()` + `V1/m` |
-| `usage.go` / `usage_handler.go` | 调用日志 + 统计 | `V1/f2.C0541a` + `V1/o.r()` |
-| `management.go` | `/status` JSON + HTML 状态页 | `V1/s` + `N1.C0270h AppUiState` |
-| `plugin_test.go` | 30+ 单测 | — |
+## 版本
 
-## 构建方法（可复用）
-
-```bash
-export PATH=/opt/go/bin:$PATH
-cd /workspace/aigw-cpa-plugin
-CGO_ENABLED=1 CC=cc go build -buildmode=c-shared -o dist/aigw-reverse-proxy.so .
-```
-注意：沙箱无 `gcc`，用 `/usr/local/bin/cc`（NDK clang 21，target `aarch64-linux-gnu`，glibc 可用）。
-Go 装在 `/opt/go`（1.27.1，本任务首次下载安装）。
-
-## 剩余待办
-
-1. **【进行中】** 已给 `gatewaySettings` 补齐 `yaml:` tag（yaml.v3 不认 `json:` tag，之前导致配置全部解码失败）→ **需重跑单测确认**
-2. 修 3 个失败用例：
-   - `TestLifecycleConfigOverride`（应随 #1 修复）
-   - `TestFrontendAuthAllowNoKeyBypasses` / `TestFrontendAuthAcceptsCorrectKeyCaseInsensitiveScheme`（应随 #1 修复）
-   - `TestInterceptRequestEnforceDefaultProvider`（enforce 分支未命中，需查 `knownProviders` 是否拿到 provider 列表）
-   - `TestHandleUsageRecordsTotals`（凭据未登记 — 检查 `rec.AuthIndex` 字段是否被 CPA 填充）
-   - `TestManagementRegistrationAndStatus`（api_key 未脱敏，应随 #1 修复）
-3. 端到端验证：dlopen 冒烟测试 或 用 CPA 真实加载 .so
-4. 写 README（配置示例 + 安装步骤）
+- 已发布：v0.13.28（流式异步修复）
+- 待发布：v0.13.29（限流识别 + 按模型冷却 + 重置时间）

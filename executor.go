@@ -110,6 +110,45 @@ func prepareUpstreamBody(body []byte, requestedModel string) ([]byte, string, er
 	return normalised, model, nil
 }
 
+// errUpstreamFrameError marks a stream that carried an error frame.
+//
+// The upstream signals a throttle inside an HTTP 200 stream, so the reader's
+// transport error stays nil; this sentinel lets the caller tell "the upstream
+// said no" apart from "the connection dropped".
+var errUpstreamFrameError = errors.New("upstream reported an error frame")
+
+// reportExecutorFailure records an upstream failure from inside the executor.
+//
+// The response interceptor is not reached when the executor itself answers with
+// an error: CPA marks the exchange failed at the executor layer
+// (conductor_execution.go "upstream execution failed") and never runs the
+// response interceptor. Reporting from both places is therefore required, not
+// redundant — without this call a throttle was classified correctly and then
+// never applied, so the same throttled account was retried on every request.
+//
+// model scopes the cooldown: a throttle parks only that model, leaving the
+// account usable for the others.
+func reportExecutorFailure(creds *workBuddyCredentials, model string, statusCode int, body []byte) {
+	if creds == nil {
+		return
+	}
+	uid := strings.TrimSpace(creds.UID)
+	if uid == "" {
+		uid = strings.TrimSpace(creds.AuthKey())
+	}
+	if uid == "" {
+		return
+	}
+	provider := workBuddyProviderKey
+
+	upErr := classifyUpstream(statusCode, body)
+	if upErr.Kind == 0 {
+		return
+	}
+	state.pool.failureForModel(provider, uid, model, upErr.Kind, upErr.Message,
+		state.settings.get(), isPermanentFailure(statusCode, upErr))
+}
+
 // executorExecute answers executor.execute (non-streaming).
 func executorExecute(request []byte) ([]byte, error) {
 	req, body, creds, errDecode := decodeExecutorRequest(request)
@@ -117,7 +156,9 @@ func executorExecute(request []byte) ([]byte, error) {
 		return errorEnvelope("invalid_executor_request", errDecode.Error(), 400), nil
 	}
 
-	upstreamBody, _, errPrepare := prepareUpstreamBody(body, req.Model)
+	// The resolved model is what the cooldown must be keyed by; see the streaming
+	// path for why req.Model alone is not enough.
+	upstreamBody, model, errPrepare := prepareUpstreamBody(body, req.Model)
 	if errPrepare != nil {
 		return errorEnvelope("invalid_request", errPrepare.Error(), 400), nil
 	}
@@ -125,7 +166,13 @@ func executorExecute(request []byte) ([]byte, error) {
 	ctx := context.Background()
 	status, headers, respBody, errChat := workBuddyUpstream.chatCompletions(ctx, creds, upstreamBody)
 	if errChat != nil {
+		// Network-level failure: no upstream body to classify.
+		reportExecutorFailure(creds, model, http.StatusBadGateway, []byte(errChat.Error()))
 		return errorEnvelope("upstream_error", errChat.Error(), 502), nil
+	}
+	if status >= 400 {
+		// The interceptor will not see this exchange, so classify and park here.
+		reportExecutorFailure(creds, model, status, respBody)
 	}
 
 	// The provider rejects non-streaming chat requests outright
@@ -219,12 +266,17 @@ func executorExecuteStream(request []byte) ([]byte, error) {
 		return errorEnvelope("executor_error", "stream_id is required for executor.execute_stream", 400), nil
 	}
 
-	upstreamBody, _, errPrepare := prepareUpstreamBody(body, req.Model)
+	// prepareUpstreamBody resolves the model from the request body when the host
+	// did not set ExecutorRequest.Model, and that resolved name is what the
+	// cooldown has to be keyed by: it is the name the router will look up on the
+	// next attempt. Using req.Model alone left model empty whenever the host
+	// omitted it, which silently demoted a throttle to an account-level cooldown.
+	upstreamBody, model, errPrepare := prepareUpstreamBody(body, req.Model)
 	if errPrepare != nil {
 		return errorEnvelope("invalid_request", errPrepare.Error(), 400), nil
 	}
 
-	go pumpUpstreamStreamIntoHost(streamID, creds, upstreamBody)
+	go pumpUpstreamStreamIntoHost(streamID, creds, upstreamBody, model)
 
 	return okEnvelope(streamChunkEnvelope{
 		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
@@ -238,7 +290,7 @@ func executorExecuteStream(request []byte) ([]byte, error) {
 // chunk exists; see that function for why. The recover mirrors the official
 // example: a panic here would otherwise leave the stream open and the client
 // waiting on a connection nobody will ever close.
-func pumpUpstreamStreamIntoHost(streamID string, creds *workBuddyCredentials, upstreamBody []byte) {
+func pumpUpstreamStreamIntoHost(streamID string, creds *workBuddyCredentials, upstreamBody []byte, model string) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			closeHostStream(streamID, fmt.Sprintf("upstream stream panic: %v", recovered))
@@ -246,8 +298,20 @@ func pumpUpstreamStreamIntoHost(streamID string, creds *workBuddyCredentials, up
 	}()
 
 	var emitted int
+	var frameError string
 	ctx := context.Background()
 	_, _, errStream := workBuddyUpstream.chatCompletionsStream(ctx, creds, upstreamBody, func(frame []byte) error {
+		// Check the raw frame: extractStreamError parses "data:" lines, so it
+		// has to see the frame before the prefix is stripped.
+		//
+		// The upstream reports a throttle as a data frame inside an HTTP 200
+		// stream, so the transport-level error stays nil and this is the only
+		// place the failure is visible. Forwarding it as content would show the
+		// error text as the model's answer.
+		if message := extractStreamError(frame); message != "" {
+			frameError = message
+			return errUpstreamFrameError
+		}
 		payload, keep := sseFrameToBareJSON(frame)
 		if !keep {
 			return nil
@@ -260,9 +324,29 @@ func pumpUpstreamStreamIntoHost(streamID string, creds *workBuddyCredentials, up
 		return nil
 	})
 
+	// frameError is checked first because it is the reliable signal: the upstream
+	// reports a throttle as a data frame inside an HTTP 200 stream, so errStream
+	// may be nil or an unrelated wrapper by the time the reader returns. Relying
+	// on errors.Is alone let the throttle fall through to the generic branch,
+	// where the reason became "Bad Gateway" and the cooldown was applied to the
+	// whole account instead of the model.
+	if frameError != "" {
+		reportExecutorFailure(creds, model, http.StatusBadGateway, []byte(frameError))
+		closeHostStream(streamID, frameError)
+		return
+	}
+	if errors.Is(errStream, errUpstreamFrameError) {
+		reportExecutorFailure(creds, model, http.StatusBadGateway, []byte(errStream.Error()))
+		closeHostStream(streamID, errStream.Error())
+		return
+	}
+
 	if errStream != nil {
-		// Report the failure on the stream rather than ending it silently, so the
-		// client learns why the answer stopped.
+		// Report before closing: the response interceptor does not run for an
+		// exchange the executor itself failed, so this is the only place the
+		// throttle can be classified and parked.
+		reportExecutorFailure(creds, model, http.StatusBadGateway, []byte(errStream.Error()))
+
 		message := errStream.Error()
 		if emitted == 0 {
 			message = "上游未返回任何内容: " + message
@@ -271,6 +355,8 @@ func pumpUpstreamStreamIntoHost(streamID string, creds *workBuddyCredentials, up
 		return
 	}
 	if emitted == 0 {
+		// A 200 with no frames is still a failure to answer.
+		reportExecutorFailure(creds, model, http.StatusBadGateway, []byte("上游未返回任何内容"))
 		closeHostStream(streamID, "上游未返回任何内容")
 		return
 	}

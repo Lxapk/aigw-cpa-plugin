@@ -40,6 +40,19 @@ type workBuddyAccount struct {
 	Domain string `json:"domain"`
 	// Region is the derived region key: "cn" or "global" (a2/b.java:284).
 	Region string `json:"region"`
+	// Cooldown is the account-level cooldown expiry, empty when the account is
+	// eligible right now. ModelCooldowns lists per-model parks, which is the
+	// common case for a throttle: the upstream reports it per model and invites
+	// switching, so the account stays usable for other models.
+	Cooldown       string            `json:"cooldown,omitempty"`
+	CooldownKind   string            `json:"cooldown_kind,omitempty"`
+	ModelCooldowns map[string]string `json:"model_cooldowns,omitempty"`
+	// ModelCoolReasons carries the upstream wording for each parked model.
+	ModelCoolReasons map[string]string `json:"model_cool_reasons,omitempty"`
+	// LastError is the most recent failure reason for this account.
+	LastError string `json:"last_error,omitempty"`
+	// Failures counts failures since the plugin started.
+	Failures int64 `json:"failures,omitempty"`
 	// Regions lists every region this person holds a credential for, in the
 	// canonical order (国内在前). One account legitimately has both: the CN and
 	// global endpoints issue separate tokens for the same uid, so collapsing them
@@ -453,6 +466,26 @@ func decodeAuthEntries(raw json.RawMessage) []hostAuthEntry {
 
 // enrichWithRuntime folds in the pool's cooldown state and the latest quota
 // reading, so the list shows operational detail without being dependent on it.
+// formatModelCooldowns renders per-model parks for the panel, keeping only the
+// ones still in force and pairing each with the upstream wording.
+func formatModelCooldowns(parks map[string]time.Time, reasons map[string]string) map[string]string {
+	if len(parks) == 0 {
+		return nil
+	}
+	now := time.Now()
+	out := make(map[string]string, len(parks))
+	for model, until := range parks {
+		if !now.Before(until) {
+			continue
+		}
+		out[model] = until.Format(time.RFC3339)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 	for i := range accounts {
 		a := &accounts[i]
@@ -510,6 +543,13 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 				a.Reason = lane.StatusMessage
 			}
 			a.CooldownUntil = lane.CooldownUntil
+			// Per-model parks. A throttle only benches the model that was asked
+			// for, so the panel has to show these separately from the
+			// account-level cooldown — otherwise an account that is serving every
+			// other model still looks unavailable.
+			a.ModelCooldowns = formatModelCooldowns(lane.ModelCooldowns, lane.ModelCoolReasons)
+			a.LastError = lane.LastError
+			a.Failures = lane.Failures
 			a.DisabledByUser = lane.DisabledByUser
 			a.AutoDisabled = lane.AutoDisabled
 			if lane.AutoDisabled {

@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "workbuddy"
-	pluginVersion = "0.13.28"
+	pluginVersion = "0.13.29"
 	pluginAuthor  = "BlackHawk"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )
@@ -330,12 +330,61 @@ type upstreamError struct {
 	Message    string
 }
 
+// rateLimitPhrases are substrings the upstream uses when it throttles.
+//
+// The upstream answers a throttle with HTTP 502 and
+// {"type":"server_error","code":"internal_server_error"}, so neither the status
+// code nor the OpenAI error vocabulary identifies it. The only usable signal is
+// the message text, which is Chinese:
+//
+//	您的使用量已超出频率限制，将在 2026-09-27 20:03:46 UTC+8 重置，您也可以切换其他模型继续使用。
+//
+// Without these the throttle fell through to failureTransient: three in a row
+// parked the whole account for errorCooldownMillis, and the account was dropped
+// even for models that were working — while the upstream's own message invites
+// switching models.
+var rateLimitPhrases = []string{
+	"频率限制",
+	"请求过于频繁",
+	"请求频率",
+	"操作过于频繁",
+	"rate limit",
+	"rate_limit",
+	"too many requests",
+	"throttl",
+}
+
+// quotaPhrases mark an exhausted balance rather than a throttle. Kept separate
+// because the two mean opposite things for the remaining credits: a throttle says
+// nothing about the balance, exhaustion zeroes it.
+var quotaPhrases = []string{
+	"余额不足",
+	"额度不足",
+	"配额不足",
+	"quota exceeded",
+	"insufficient quota",
+	"insufficient_quota",
+	"out of credits",
+}
+
+// containsAnyFold reports whether s contains any phrase, case-insensitively.
+func containsAnyFold(s string, phrases []string) bool {
+	lowered := strings.ToLower(s)
+	for _, phrase := range phrases {
+		if strings.Contains(lowered, strings.ToLower(phrase)) {
+			return true
+		}
+	}
+	return false
+}
+
 // classifyUpstream ports the status handling in V1/o.k():
 //
 //	c.p() >= 400 -> V1.o.l(400, "upstream_rejected", body) and V1.k.c(...)
 //
 // OpenAI/Anthropic gateways surface the semantic class in the body, so the
-// status code alone is not enough.
+// status code alone is not enough. The upstream here reports a throttle as
+// 502/internal_server_error, so the message text is checked too.
 func classifyUpstream(statusCode int, body []byte) upstreamError {
 	err := upstreamError{StatusCode: statusCode, Kind: failureTransient}
 
@@ -351,6 +400,13 @@ func classifyUpstream(statusCode int, body []byte) upstreamError {
 	}
 	err.Message = strings.TrimSpace(doc.Error.Message)
 	err.Code = strings.TrimSpace(doc.Error.Code)
+	if err.Message == "" {
+		// The body may be a bare string rather than {"error":{...}}: the executor
+		// passes the frame text it captured, and an upstream can answer with a
+		// plain message. Without this the phrase check below has nothing to look
+		// at, and a throttle delivered that way was classified as a generic 5xx.
+		err.Message = strings.TrimSpace(string(body))
+	}
 	errType := strings.ToLower(strings.TrimSpace(doc.Error.Type))
 	errCode := strings.ToLower(err.Code)
 
@@ -369,7 +425,26 @@ func classifyUpstream(statusCode int, body []byte) upstreamError {
 		err.Kind = failureQuota
 
 	case statusCode >= 500:
-		err.Kind = failureTransient
+		// The upstream reports a throttle as 502/internal_server_error, so a 5xx
+		// is not enough to call this transient. Check the text before deciding;
+		// otherwise a throttle is treated as a generic server fault and parks the
+		// whole account instead of just the throttled model.
+		if containsAnyFold(err.Message, rateLimitPhrases) {
+			err.Kind = failureRate
+		} else if containsAnyFold(err.Message, quotaPhrases) {
+			err.Kind = failureQuota
+		} else {
+			err.Kind = failureTransient
+		}
+
+	default:
+		// Non-5xx, unmatched code: the message is the only remaining signal.
+		// "您的使用量已超出频率限制…" arrives this way on some deployments.
+		if containsAnyFold(err.Message, rateLimitPhrases) {
+			err.Kind = failureRate
+		} else if containsAnyFold(err.Message, quotaPhrases) {
+			err.Kind = failureQuota
+		}
 	}
 
 	if err.Message == "" {
