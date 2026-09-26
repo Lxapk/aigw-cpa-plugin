@@ -1283,6 +1283,8 @@ GET /v0/management/workbuddy/calls    # 最近 50 条调用记录
 | `release asset checksums.txt not found` | Release 里没传 `checksums.txt` |
 | `checksum mismatch` | zip 被改动过，或 `checksums.txt` 未同步更新 |
 | `dynamic library filename must be ...` | zip 内的 `.so` 名字不对或不在根目录 |
+| **`target dynamic library must be at zip root`** | **zip 内的 `.so` 带了目录前缀**（例如打成 `linux/amd64/workbuddy.so`）。商店要求归档里**只有一个**、**位于根目录**的 `<id>.so`；宿主推荐的 `plugins/<GOOS>/<GOARCH>/` 布局是**安装之后**由宿主落盘时决定的，与 zip 结构无关 |
+| `zip contains multiple target dynamic libraries` | 归档里有多个 `.so`。只放一个 |
 | 日志没有 `plugin loaded` | 架构不匹配（用 `uname -m` 核对）、或 `plugins.enabled` 没开 |
 | 请求全部 401 | `api_key` 已设且 `allow_no_key: false`，但客户端没带 `Authorization: Bearer <key>` |
 

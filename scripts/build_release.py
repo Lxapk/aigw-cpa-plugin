@@ -25,14 +25,27 @@ import zipfile
 def build_zip(plugin_id: str, so_path: str, out_path: str, goarch: str) -> str:
     """把单个 .so 打进 zip。
 
-    包内同时提供两种布局，对应宿主的两条搜索路径
-    （docs/examples/plugin/simple/README_CN.md「发现规则」）：
+    包内**只能有一个条目**，且**位于 zip 根**、文件名严格为 ``<id>.so``。
 
-        plugins/linux/<GOARCH>/<id>.so   —— 官方推荐的位置
-        <id>.so                          —— 放在 plugins 根目录时可用
+    这不是可选项：CPA 的插件商店在解包时逐条校验
+    （internal/pluginstore/install.go readTargetLibrary）：
 
-    包含子目录条目是为了让「解压到 plugins/ 即可」这条路径直接得到官方
-    推荐的布局，而不必手工创建 linux/<GOARCH> 目录。
+        if cleanedName != targetName && cleanedName != versionedTargetName {
+            if path.Base(cleanedName) == targetName {
+                return "target dynamic library must be at zip root"
+            }
+            return "dynamic library filename must be ..."
+        }
+
+    也就是说：带目录前缀会报 "must be at zip root"，多个 .so 会报
+    "zip contains multiple target dynamic libraries"。
+
+    早先尝试过额外附带 ``linux/<arch>/<id>.so`` 以对齐宿主推荐的目录布局，
+    商店直接拒绝。目录布局是**安装之后**宿主落盘时决定的
+    （installTargetPath 会写到 plugins/<GOOS>/<GOARCH>/<id>-v<版本>.so），
+    与 zip 内部结构无关，所以 zip 保持根目录单一文件即可。
+
+    ``goarch`` 只用于命名检查与调用方对称，不进入包内路径。
     """
     if not os.path.isfile(so_path):
         raise SystemExit(f"找不到 .so: {so_path}")
@@ -40,17 +53,13 @@ def build_zip(plugin_id: str, so_path: str, out_path: str, goarch: str) -> str:
     with open(so_path, "rb") as fh:
         data = fh.read()
 
-    entries = [
-        f"{plugin_id}.so",
-        f"linux/{goarch}/{plugin_id}.so",
-    ]
+    inner_name = f"{plugin_id}.so"
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        for inner_name in entries:
-            # 固定时间戳让产物可复现；writestr 保证条目名不被进一步改写。
-            info = zipfile.ZipInfo(inner_name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.external_attr = 0o755 << 16  # 保留可执行权限
-            info.compress_type = zipfile.ZIP_DEFLATED
-            zf.writestr(info, data)
+        # 固定时间戳让产物可复现；writestr 保证条目名不带任何目录前缀。
+        info = zipfile.ZipInfo(inner_name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.external_attr = 0o755 << 16  # 保留可执行权限
+        info.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(info, data)
 
     return sha256_file(out_path)
 
