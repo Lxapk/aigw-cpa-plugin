@@ -695,8 +695,17 @@ func main() {
 		} `json:"routing"`
 	}
 	mustUnmarshal(routingEnv.Body, &routingDoc)
-	if len(routingDoc.Routing.Options) != 5 {
-		die("expected 5 strategy options, got %d", len(routingDoc.Routing.Options))
+	// Four strategies: by_expiry / by_credits / round_robin / random.
+	// A fifth ("weighted", the three-factor weighted picker) used to be offered
+	// and was removed — it shared by_credits' entire call path and its enable
+	// switch was never read.
+	if len(routingDoc.Routing.Options) != 4 {
+		die("expected 4 strategy options, got %d", len(routingDoc.Routing.Options))
+	}
+	for _, opt := range routingDoc.Routing.Options {
+		if value, _ := opt["value"].(string); value == "weighted" {
+			die("the removed weighted strategy is still advertised")
+		}
 	}
 	ok("routing/status -> strategy=%s options=%d", routingDoc.Routing.Strategy, len(routingDoc.Routing.Options))
 
