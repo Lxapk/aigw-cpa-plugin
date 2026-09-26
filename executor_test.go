@@ -223,8 +223,8 @@ func TestListModelsSendsExpectedRequest(t *testing.T) {
 		if r.Header.Get("X-User-Id") != "u-1" {
 			t.Errorf("X-User-Id = %q", r.Header.Get("X-User-Id"))
 		}
-		if r.Header.Get("User-Agent") != codebuddyUA {
-			t.Errorf("UA = %q", r.Header.Get("User-Agent"))
+		if r.Header.Get("User-Agent") != "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1" {
+			t.Errorf("UA = %q, want the desktop agent", r.Header.Get("User-Agent"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":0,"data":{"models":[{"id":"m1","name":"M1"}]}}`))

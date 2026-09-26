@@ -560,11 +560,18 @@ func refreshWorkBuddyToken(creds *workBuddyCredentials) (*workBuddyCredentials, 
 //   - X-IDE-Type/Name/Version plus X-Agent-Purpose select the desktop session.
 //   - The User-Agent is the WorkBuddy one, not the CLI one.
 func applyGrowthHeaders(h http.Header, creds *workBuddyCredentials) {
-	variant := variantForCredentials(creds)
+	applyGrowthHeadersFor(h, creds, variantForCredentials(creds))
+}
 
+// applyGrowthHeadersFor is the realm-explicit form, shared with the chat path.
+//
+// Both surfaces speak as the desktop client, so they send the same identity;
+// only the realm differs. Keeping one implementation means a fix here reaches
+// both, instead of the chat path drifting from the growth path as it did when
+// the chat header set was written separately.
+func applyGrowthHeadersFor(h http.Header, creds *workBuddyCredentials, variant wbVariant) {
 	host := growthDomainHost(variant)
 	origin := variant.productDomain()
-	requestID := growthRequestID(creds)
 
 	h.Set("Authorization", "Bearer "+creds.AccessToken)
 	h.Set("Accept", "application/json, text/plain, */*")
@@ -572,11 +579,12 @@ func applyGrowthHeaders(h http.Header, creds *workBuddyCredentials) {
 	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("Origin", origin)
 	h.Set("Referer", origin+"/")
-	h.Set("Accept-Language", "en-US")
+	h.Set("Accept-Language", "zh-CN")
 
-	// First-party client marker and correlation ids.
+	// First-party client marker and correlation ids. Without the marker the
+	// gateway rejects the call as "request illegal" rather than as unauthorised.
 	h.Set("X-CodeBuddy-Request", "1")
-	h.Set("X-Request-ID", requestID)
+	h.Set("X-Request-ID", growthRequestID(creds))
 	h.Set("X-Machine-ID", growthDerivedID(creds, "machine"))
 	h.Set("X-Session-ID", growthDerivedID(creds, "session"))
 
@@ -596,7 +604,7 @@ func applyGrowthHeaders(h http.Header, creds *workBuddyCredentials) {
 		h.Set("User-Agent", "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1")
 	}
 
-	// X-Domain is a bare host for this surface. See the note above.
+	// X-Domain is a bare host for this surface, never a URL.
 	h.Set("X-Domain", host)
 
 	if creds.UID != "" {
@@ -662,33 +670,28 @@ func growthDomainHost(variant wbVariant) string {
 // The reference implementation (variant.rs::productDomain) is explicit that the
 // international product domain is www.codebuddy.ai, not workbuddy.ai —
 // CodeBuddy tooling classifies anything else as a self-hosted deployment.
+// applyWorkBuddyHeadersVariant writes the identity for a chat/completions call.
+//
+// This is the desktop conversation surface, and its identity differs from the
+// light billing header set in every field that matters:
+//
+//	X-Domain             bare host ("copilot.tencent.com"), never a URL
+//	X-CodeBuddy-Request  first-party client marker; the gateway answers
+//	                     "request illegal" without it
+//	X-Request-ID etc.    correlation ids the desktop client always sends
+//	User-Agent           the WorkBuddy desktop agent, not the CLI one
+//
+// It previously wrote X-Domain as a URL, omitted the marker and correlation
+// ids, and used the CLI User-Agent — which is exactly the shape the upstream
+// rejects as illegal.
 func applyWorkBuddyHeadersVariant(h http.Header, creds *workBuddyCredentials, variant wbVariant) {
-	h.Set("Authorization", "Bearer "+creds.AccessToken)
-	h.Set("Accept", "application/json")
-	h.Set("Content-Type", "application/json")
-	h.Set("X-Requested-With", "XMLHttpRequest")
-	h.Set("User-Agent", codebuddyUA)
-
-	origin := variant.productDomain()
-	h.Set("Origin", origin)
-	h.Set("Referer", origin+"/")
-	h.Set("X-Product", "SaaS")
-	if creds.UID != "" {
-		h.Set("X-User-Id", creds.UID)
-	}
-	if creds.EnterpriseID != "" {
-		h.Set("X-Enterprise-Id", creds.EnterpriseID)
-		h.Set("X-Tenant-Id", creds.EnterpriseID)
-	}
-	if creds.Domain != "" {
-		h.Set("X-Domain", productDomainFor(creds.Domain, variant))
-	}
+	// Shared with the growth surface: both are the same desktop identity.
+	applyGrowthHeadersFor(h, creds, variant)
 }
 
-// applyWorkBuddyHeaders ports a2/b.p(): the upstream header set, including the
-// optional identity headers.
+// applyWorkBuddyHeaders writes the chat identity for a credential's own realm.
 func applyWorkBuddyHeaders(h http.Header, creds *workBuddyCredentials) {
-	applyWorkBuddyHeadersVariant(h, creds, variantForDomain(creds.Domain))
+	applyWorkBuddyHeadersVariant(h, creds, variantForCredentials(creds))
 }
 
 // ---- tiny helpers ---------------------------------------------------------

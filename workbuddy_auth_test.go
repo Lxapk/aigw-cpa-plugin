@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -288,32 +289,102 @@ func TestWorkBuddyAuthDataMapsToHostRecord(t *testing.T) {
 	}
 }
 
-// ---- request headers (a2/b.p) ------------------------------------------
+// TestChatRequestCarriesTheDesktopIdentity is the end-to-end guard for
+// "request illegal".
+//
+// The chat path built its own header set, which sent X-Domain as a URL, omitted
+// X-CodeBuddy-Request and the correlation ids, and used the CLI User-Agent. The
+// gateway treats that as a non-first-party request and answers "request
+// illegal" rather than an auth error, so the failure looked like a policy
+// problem instead of a header problem.
+func TestChatRequestCarriesTheDesktopIdentity(t *testing.T) {
+	resetState()
 
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+	}))
+	defer srv.Close()
+
+	prev := copilotHostValue()
+	setCopilotHost(srv.URL)
+	defer setCopilotHost(prev)
+
+	creds := &workBuddyCredentials{AccessToken: "tok", UID: "u-1", Domain: "copilot.tencent.com"}
+	if _, _, _, err := workBuddyUpstream.chatCompletions(t.Context(), creds,
+		[]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`)); err != nil {
+		t.Fatalf("chatCompletions: %v", err)
+	}
+
+	if captured == nil {
+		t.Fatal("the upstream request never arrived")
+	}
+	if got := captured.Get("X-Domain"); got != "copilot.tencent.com" {
+		t.Errorf("X-Domain = %q, want the bare host", got)
+	}
+	if got := captured.Get("X-CodeBuddy-Request"); got != "1" {
+		t.Errorf("X-CodeBuddy-Request = %q, want 1; without it the gateway rejects the call", got)
+	}
+	for _, key := range []string{"X-Request-ID", "X-Machine-ID", "X-Session-ID"} {
+		if captured.Get(key) == "" {
+			t.Errorf("missing correlation header %s", key)
+		}
+	}
+	if ua := captured.Get("User-Agent"); !strings.HasPrefix(ua, "WorkBuddy/") {
+		t.Errorf("User-Agent = %q, want the desktop agent", ua)
+	}
+}
+
+// ---- request headers (desktop conversation identity) --------------------
+
+// TestApplyWorkBuddyHeadersMatchesSource pins the header set the chat path
+// sends.
+//
+// These values are the ones the upstream gateway accepts. Sending a URL in
+// X-Domain, omitting X-CodeBuddy-Request, or using the CLI User-Agent makes the
+// gateway answer "request illegal" instead of an auth error — which is what the
+// chat path did before it shared the desktop identity.
 func TestApplyWorkBuddyHeadersMatchesSource(t *testing.T) {
 	creds := &workBuddyCredentials{
-		AccessToken: "tok", Domain: "cn", UID: "u-1", EnterpriseID: "e-1",
+		AccessToken: "tok", Domain: "copilot.tencent.com", UID: "u-1", EnterpriseID: "e-1",
 	}
 	h := http.Header{}
 	applyWorkBuddyHeaders(h, creds)
 
 	checks := map[string]string{
-		"Authorization":    "Bearer tok",
-		"Accept":           "application/json",
-		"Content-Type":     "application/json",
-		"X-Requested-With": "XMLHttpRequest",
-		"User-Agent":       codebuddyUA,
-		"Origin":           "https://www.codebuddy.cn",
-		"Referer":          "https://www.codebuddy.cn/",
-		"X-Product":        "SaaS",
-		"X-User-Id":        "u-1",
-		"X-Enterprise-Id":  "e-1",
-		"X-Tenant-Id":      "e-1",
-		"X-Domain":         "cn",
+		"Authorization":       "Bearer tok",
+		"Content-Type":        "application/json",
+		"X-Requested-With":    "XMLHttpRequest",
+		"User-Agent":          "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
+		"Origin":              "https://www.codebuddy.cn",
+		"Referer":             "https://www.codebuddy.cn/",
+		"X-Product":           "WorkBuddy",
+		"X-User-Id":           "u-1",
+		"X-Enterprise-Id":     "e-1",
+		"X-Tenant-Id":         "e-1",
+		"X-Domain":            "copilot.tencent.com",
+		"X-CodeBuddy-Request": "1",
+		"X-Agent-Purpose":     "conversation",
+		"X-IDE-Type":          "WorkBuddy",
+		"X-IDE-Name":          "WorkBuddy",
+		"X-IDE-Version":       "5.5.6",
 	}
 	for key, want := range checks {
 		if got := h.Get(key); got != want {
 			t.Errorf("header %s = %q, want %q", key, got, want)
+		}
+	}
+	// X-Domain must be a host, not a URL: a URL is what the gateway rejects.
+	if strings.HasPrefix(h.Get("X-Domain"), "http") {
+		t.Errorf("X-Domain = %q must be a bare host", h.Get("X-Domain"))
+	}
+	// Correlation ids the desktop client always sends.
+	for _, key := range []string{"X-Request-ID", "X-Machine-ID", "X-Session-ID"} {
+		if h.Get(key) == "" {
+			t.Errorf("missing correlation header %s", key)
 		}
 	}
 }
@@ -401,11 +472,21 @@ func TestGlobalDomainSelectsAllBases(t *testing.T) {
 	}
 }
 
-func TestApplyWorkBuddyHeadersOmitsEmptyIdentity(t *testing.T) {
-	creds := &workBuddyCredentials{AccessToken: "tok", Domain: "cn"}
+// TestApplyWorkBuddyHeadersFallsBackToAnonymousUid covers the empty-uid case.
+//
+// The desktop identity always sends X-User-Id: the reference implementation
+// writes str(uid or "anonymous"). Omitting it makes the request look unlike the
+// first-party client, which the gateway rejects. Enterprise headers have no
+// such default, so they are still omitted.
+func TestApplyWorkBuddyHeadersFallsBackToAnonymousUid(t *testing.T) {
+	creds := &workBuddyCredentials{AccessToken: "tok", Domain: "copilot.tencent.com"}
 	h := http.Header{}
 	applyWorkBuddyHeaders(h, creds)
-	for _, key := range []string{"X-User-Id", "X-Enterprise-Id", "X-Tenant-Id"} {
+
+	if got := h.Get("X-User-Id"); got != "anonymous" {
+		t.Errorf("X-User-Id = %q, want anonymous", got)
+	}
+	for _, key := range []string{"X-Enterprise-Id", "X-Tenant-Id"} {
 		if h.Get(key) != "" {
 			t.Errorf("%s should be omitted when empty, got %q", key, h.Get(key))
 		}

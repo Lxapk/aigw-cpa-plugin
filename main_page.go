@@ -399,16 +399,29 @@ func renderMainPage() string {
 	curVariant := state.settings.get().VariantOverride
 	b.WriteString(`<div class="card"><h2>供应商切换 <span class="hint">国内供应商与国际供应商</span></h2>`)
 	b.WriteString(`<div class="seg" id="variantSeg">`)
-	for _, opt := range []struct{ v, label string }{{"auto", "全部供应商"}, {"cn", "国内供应商"}, {"ai", "国际供应商"}} {
+	for _, opt := range []struct{ v, label, title string }{
+		{"auto", "全部供应商", "两组账号都参与调用；授权走国内"},
+		{"cn", "国内供应商", "仅国内账号参与；授权走 copilot.tencent.com"},
+		{"ai", "国际供应商", "仅国际账号参与；授权走 www.workbuddy.ai"},
+	} {
 		cls := ""
 		if (opt.v == "auto" && curVariant == "") || opt.v == curVariant {
 			cls = ` class="active"`
 		}
-		b.WriteString(`<button type="button" data-variant="` + opt.v + `"` + cls + ` onclick="setVariant('` + opt.v + `')">` + opt.label + `</button>`)
+		b.WriteString(`<button type="button" data-variant="` + opt.v + `"` + cls +
+			` title="` + html.EscapeString(opt.title) + `"` +
+			` onclick="setVariant('` + opt.v + `')">` + opt.label + `</button>`)
 	}
 	b.WriteString(`</div>`)
-	b.WriteString(`<div class="note">决定本插件这一轮操作<strong>作用于哪些账号</strong>：<strong>全部供应商</strong>（默认）让国内与国际账号同轮参与；<strong>国内供应商</strong>只处理国内账号，<strong>国际供应商</strong>只处理国际账号。</div>`)
-	b.WriteString(`<div class="note">它<strong>不会</strong>把账号改判成另一个供应商：每个账号始终调用签发它凭据的那一侧接口，否则必然鉴权失败。因此选择某一侧时，另一侧账号只是被跳过，不需要重新登录。</div>`)
+	b.WriteString(`<div class="note">用途一：决定本插件这一轮操作<strong>作用于哪些账号</strong>——<strong>全部供应商</strong>（默认）让国内与国际账号同轮参与；<strong>国内供应商</strong>只处理国内账号，<strong>国际供应商</strong>只处理国际账号。</div>`)
+	b.WriteString(`<div class="note">用途二：决定 <strong>CPA 的 OAuth 授权走哪一侧</strong>——` +
+		`选<strong>国内供应商</strong>时，点 CPA 的授权入口会打开 <code>copilot.tencent.com</code>，签发国内凭据；` +
+		`选<strong>国际供应商</strong>时打开 <code>www.workbuddy.ai</code>，签发国际凭据。</div>`)
+	b.WriteString(`<div class="note"><strong>要两个供应商的账号</strong>：先切到国内供应商 → 在 CPA 完成授权；` +
+		`再切到国际供应商 → 在 CPA 完成授权；最后切回「全部供应商」，两组账号就会一起参与调用。</div>`)
+	b.WriteString(`<div class="note">选「全部供应商」时授权默认走<strong>国内</strong>（多数账号是国内）；` +
+		`如需国际凭据，请先切到「国际供应商」再授权。</div>`)
+	b.WriteString(`<div class="note">该开关<strong>不会</strong>把账号改判成另一个供应商：每个账号始终调用签发它凭据的那一侧接口，否则必然鉴权失败。因此选择某一侧时，另一侧账号只是被跳过，不需要重新登录。</div>`)
 	b.WriteString(`<div class="note">国际供应商没有签到接口，也没有成长任务中心；这些功能只在选用国内账号时执行。</div>`)
 	b.WriteString(`<div class="muted small" id="variantMsg"></div>`)
 
