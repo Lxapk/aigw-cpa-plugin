@@ -84,7 +84,7 @@ jobs:
             --tag "v${{ steps.ver.outputs.version }}" \
             --checksums release/checksums.txt \
             --platforms linux/amd64 \
-            --author TaiXu \
+            --author BlackHawk \
             --out registry.json
 
       - name: Publish

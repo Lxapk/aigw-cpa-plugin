@@ -11,7 +11,7 @@ CPA 读 `plugins.store-sources` 里列的 registry.json 来发现可安装插件
       --name "AIGW 反向代理" \
       --version 0.1.0 \
       --repo https://github.com/<owner>/<repo> \
-      --author TaiXu \
+      --author BlackHawk \
       --description "从 AI 聚合网关 0.1.18 移植的反向代理网关" \
       --out registry.json
 """
