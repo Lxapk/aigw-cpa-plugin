@@ -272,6 +272,64 @@ func setWebBase(v string) {
 	workBuddyWebMu.Unlock()
 }
 
+// growthDiagnostics collects request-level failures for the current pass.
+//
+// A 404 on these endpoints is otherwise indistinguishable from a routing
+// problem: the caller only sees "执行失败 404", which does not say which host or
+// path was tried. Collecting the detail here means the run log names the host,
+// path and response body.
+type growthDiagnostics struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (d *growthDiagnostics) add(format string, args ...any) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Keep the list bounded; a broken endpoint can fail on every call.
+	if len(d.lines) >= 20 {
+		return
+	}
+	d.lines = append(d.lines, fmt.Sprintf(format, args...))
+}
+
+func (d *growthDiagnostics) snapshot() []string {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, len(d.lines))
+	copy(out, d.lines)
+	return out
+}
+
+// activeGrowthDiagnostics is the sink for the pass currently running.
+//
+// The HTTP helpers are methods on the shared client and have no call context, so
+// the runner publishes its collector here for the duration of a pass. It is
+// guarded because manual and scheduled passes can overlap.
+var activeGrowthDiagnostics struct {
+	mu sync.RWMutex
+	d  *growthDiagnostics
+}
+
+func setGrowthDiagnostics(d *growthDiagnostics) {
+	activeGrowthDiagnostics.mu.Lock()
+	activeGrowthDiagnostics.d = d
+	activeGrowthDiagnostics.mu.Unlock()
+}
+
+func logGrowthDiagnostic(format string, args ...any) {
+	activeGrowthDiagnostics.mu.RLock()
+	d := activeGrowthDiagnostics.d
+	activeGrowthDiagnostics.mu.RUnlock()
+	d.add(format, args...)
+}
+
 // growthRequest performs one JSON request against the growth API.
 //
 // The body handling is shared because every endpoint answers with the same
@@ -291,7 +349,8 @@ func (c *workBuddyClient) growthRequest(
 		}
 		reader = bytes.NewReader(payload)
 	}
-	req, errRequest := http.NewRequestWithContext(ctx, method, base+path, reader)
+	fullURL := base + path
+	req, errRequest := http.NewRequestWithContext(ctx, method, fullURL, reader)
 	if errRequest != nil {
 		return 0, nil, errRequest
 	}
@@ -305,15 +364,37 @@ func (c *workBuddyClient) growthRequest(
 
 	resp, errDo := c.httpClient.Do(req)
 	if errDo != nil {
+		logGrowthDiagnostic("%s %s → 网络错误: %v", method, fullURL, errDo)
 		return 0, nil, errDo
 	}
 	defer resp.Body.Close()
 
 	raw, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if errRead != nil {
+		logGrowthDiagnostic("%s %s → 读取响应失败: %v", method, fullURL, errRead)
 		return resp.StatusCode, nil, errRead
 	}
+
+	// Log anything that is not a clean success, with enough context to tell a
+	// routing problem from an authorisation or business error.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		logGrowthDiagnostic("%s %s → HTTP %d (X-Domain=%s) %s",
+			method, fullURL, resp.StatusCode,
+			req.Header.Get("X-Domain"), truncateForLog(raw, 300))
+	} else if _, ok := decodeGrowthEnvelope(raw); !ok {
+		logGrowthDiagnostic("%s %s → HTTP %d 但 code!=0: %s",
+			method, fullURL, resp.StatusCode, truncateForLog(raw, 300))
+	}
 	return resp.StatusCode, raw, nil
+}
+
+// truncateForLog shortens a response body for the log.
+func truncateForLog(raw []byte, max int) string {
+	text := strings.TrimSpace(string(raw))
+	if len(text) > max {
+		text = text[:max] + "…"
+	}
+	return text
 }
 
 // growthEnvelope is the shared response shape.

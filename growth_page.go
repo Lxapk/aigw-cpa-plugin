@@ -92,8 +92,16 @@ func handleGrowthTasksRequest(req pluginapi.ManagementRequest) managementRespons
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	diagnostics := &growthDiagnostics{}
+	setGrowthDiagnostics(diagnostics)
+	defer setGrowthDiagnostics(nil)
+
 	tasks, errFetch := workBuddyUpstream.fetchGrowthTasks(ctx, account.Creds)
 	if errFetch != nil {
+		detail := ""
+		if lines := diagnostics.snapshot(); len(lines) > 0 {
+			detail = strings.Join(lines, "; ")
+		}
 		return managementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    jsonResponseHeaders(),
@@ -101,6 +109,9 @@ func handleGrowthTasksRequest(req pluginapi.ManagementRequest) managementRespons
 				"ok":    false,
 				"error": errFetch.Error(),
 				"uid":   uid,
+				// The request-level detail names the host, path and body, which
+				// the bare error string does not.
+				"detail": detail,
 			}),
 		}
 	}

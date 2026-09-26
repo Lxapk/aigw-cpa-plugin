@@ -468,7 +468,10 @@ func mainPageScript() string {
     return call(BASE + '/growth/tasks?uid=' + encodeURIComponent(uid)).then(function (payload) {
       var box = document.getElementById('growthDetail');
       if (payload.ok === false) {
-        msgSet('growthMsg', '查询失败：' + (payload.error || '未知原因'), 'bad');
+        msgSet('growthMsg', '查询失败：' + (payload.error || '未知原因') +
+          (payload.detail ? ' — ' + payload.detail : ''), 'bad');
+        if (box) box.innerHTML = '<div class="note bad">' + escapeHTML(payload.error || '') +
+          (payload.detail ? '<br>' + escapeHTML(payload.detail) : '') + '</div>';
         return;
       }
       var tasks = payload.tasks || [];
@@ -476,7 +479,6 @@ func mainPageScript() string {
       var travel = s.travel || {};
       msgSet('growthMsg', '账号 ' + (payload.label || label) + '：能量 ' + (s.energy || 0) +
         '，连续打卡 ' + (s.streak_days || 0) + ' 天，猫猫 ' + (travel.state || '未知'), 'ok');
-
       if (box) {
         var html = '<table><thead><tr><th>任务</th><th class="num">进度</th><th class="num">奖励</th><th>状态</th></tr></thead><tbody>';
         for (var i = 0; i < tasks.length; i++) {

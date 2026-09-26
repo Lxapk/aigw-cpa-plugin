@@ -138,9 +138,18 @@ func (r *growthRunner) run(ctx context.Context, creds *workBuddyCredentials, lab
 	name := firstNonEmpty(label, creds.UID)
 	logger.add("info", "开始为账号 %s 运行成长任务", name)
 
+	// Publish a diagnostics sink for the duration of the pass so HTTP failures
+	// name the host, path and response body in the run log.
+	diagnostics := &growthDiagnostics{}
+	setGrowthDiagnostics(diagnostics)
+	defer setGrowthDiagnostics(nil)
+
 	tasks, errFetch := r.fetch(ctx, creds)
 	if errFetch != nil {
 		logger.add("error", "获取任务清单失败: %v", errFetch)
+		for _, line := range diagnostics.snapshot() {
+			logger.add("warn", "  %s", line)
+		}
 		result.Error = errFetch.Error()
 		result.Logs = logger.snapshot()
 		r.emit(logger)
@@ -187,13 +196,21 @@ func (r *growthRunner) run(ctx context.Context, creds *workBuddyCredentials, lab
 		logger.add("info", "🎉 全部完成！本次累计新增到账 +%d 积分", result.Earned)
 	}
 
+	// Surface any request-level failure, even on an otherwise healthy run: a
+	// task that silently did not light up is usually a 404 or 403 here.
+	if lines := diagnostics.snapshot(); len(lines) > 0 {
+		logger.add("warn", "本次有 %d 个请求未成功，详情：", len(lines))
+		for _, line := range lines {
+			logger.add("warn", "  %s", line)
+		}
+	}
+
 	result.OK = true
 	result.FinishedAt = r.clock()
 	result.Logs = logger.snapshot()
 	r.emit(logger)
 	return result
 }
-
 func (r *growthRunner) clock() time.Time {
 	if r.now != nil {
 		return r.now()

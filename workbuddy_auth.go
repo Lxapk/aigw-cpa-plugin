@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -441,24 +443,27 @@ func refreshWorkBuddyToken(creds *workBuddyCredentials) (*workBuddyCredentials, 
 
 // applyGrowthHeaders writes the header set the growth centre expects.
 //
-// The growth endpoints are not served by the same identity as the billing
-// endpoints: they belong to the desktop client's conversation surface, which
-// authenticates with the WorkBuddy identity (wb_identity.build_identity_headers
-// in the reference implementation) rather than the light CLI header set.
-//
-// The differences that matter:
+// The growth endpoints are served by the desktop conversation identity
+// (wb_identity.build_identity_headers with PRODUCT_DESKTOP in the reference
+// implementation), not by the lighter billing identity. The differences that
+// matter:
 //
 //   - X-Domain must be the bare host ("copilot.tencent.com"), not a URL. The
-//     generic path writes "https://www.codebuddy.cn", and an unrecognised
-//     X-Domain makes the edge router answer 404 rather than 401.
-//   - X-IDE-Type/Name/Version and X-Agent-Purpose identify the desktop client;
-//     without them the request is not routed to the growth service.
+//     billing path writes a URL, and an unrecognised X-Domain is routed to the
+//     wrong upstream.
+//   - X-CodeBuddy-Request identifies the request as coming from a first-party
+//     client; the gateway answers 404 for third-party shaped traffic rather
+//     than 403.
+//   - X-Request-ID / X-Machine-ID / X-Session-ID are required correlation
+//     headers.
+//   - X-IDE-Type/Name/Version plus X-Agent-Purpose select the desktop session.
 //   - The User-Agent is the WorkBuddy one, not the CLI one.
 func applyGrowthHeaders(h http.Header, creds *workBuddyCredentials) {
 	variant := variantForCredentials(creds)
 
 	host := growthDomainHost(variant)
 	origin := variant.productDomain()
+	requestID := growthRequestID(creds)
 
 	h.Set("Authorization", "Bearer "+creds.AccessToken)
 	h.Set("Accept", "application/json, text/plain, */*")
@@ -466,7 +471,13 @@ func applyGrowthHeaders(h http.Header, creds *workBuddyCredentials) {
 	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("Origin", origin)
 	h.Set("Referer", origin+"/")
-	h.Set("Accept-Language", "zh-CN")
+	h.Set("Accept-Language", "en-US")
+
+	// First-party client marker and correlation ids.
+	h.Set("X-CodeBuddy-Request", "1")
+	h.Set("X-Request-ID", requestID)
+	h.Set("X-Machine-ID", growthDerivedID(creds, "machine"))
+	h.Set("X-Session-ID", growthDerivedID(creds, "session"))
 
 	if variant == variantAi {
 		h.Set("X-Agent-Purpose", "conversation")
@@ -489,11 +500,45 @@ func applyGrowthHeaders(h http.Header, creds *workBuddyCredentials) {
 
 	if creds.UID != "" {
 		h.Set("X-User-Id", creds.UID)
+	} else {
+		h.Set("X-User-Id", "anonymous")
 	}
 	if creds.EnterpriseID != "" {
 		h.Set("X-Enterprise-Id", creds.EnterpriseID)
 		h.Set("X-Tenant-Id", creds.EnterpriseID)
 	}
+}
+
+// growthRequestID renders a fresh correlation id.
+//
+// The upstream expects a 32-char hex id; a repeated one is treated as a
+// duplicate request rather than a new one.
+func growthRequestID(creds *workBuddyCredentials) string {
+	seed := ""
+	if creds != nil {
+		seed = creds.UID
+	}
+	return growthDerivedIDFrom(seed, fmt.Sprintf("%d", time.Now().UnixNano()))
+}
+
+// growthDerivedID derives a stable per-account identifier of the shape the
+// desktop client sends (hex, 32 chars).
+//
+// The reference implementation derives machine/session ids from the uid with a
+// hash so they stay constant for an account across runs; sending random values
+// would make every request look like a new device.
+func growthDerivedID(creds *workBuddyCredentials, kind string) string {
+	seed := ""
+	if creds != nil {
+		seed = creds.UID
+	}
+	return growthDerivedIDFrom(seed, kind)
+}
+
+// growthDerivedIDFrom is a deterministic 32-char hex digest of seed|kind.
+func growthDerivedIDFrom(seed, kind string) string {
+	sum := sha256.Sum256([]byte(seed + "|" + kind))
+	return hex.EncodeToString(sum[:16])
 }
 
 // growthDomainHost renders the X-Domain value for the growth surface.

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -499,5 +501,72 @@ func TestGrowthHeadersFollowVariant(t *testing.T) {
 	applyGrowthHeaders(h, creds)
 	if got := h.Get("X-Domain"); got != "www.workbuddy.ai" {
 		t.Fatalf("international X-Domain = %q, want www.workbuddy.ai", got)
+	}
+}
+
+// ---- growth diagnostics --------------------------------------------------
+
+// TestGrowthRunLogsRequestFailures is the guard for the 404 investigation: a
+// failing request must name the host, path and body in the run log, because the
+// bare "执行失败 404" does not say which endpoint was tried.
+func TestGrowthRunLogsRequestFailures(t *testing.T) {
+	resetState()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":404,"msg":"not found"}`))
+	}))
+	defer srv.Close()
+
+	previousChat := workBuddyChatBase()
+	setChatBase(srv.URL)
+	defer setChatBase(previousChat)
+
+	creds := &workBuddyCredentials{
+		AccessToken: "[REDACTED]",
+		UID:         "u-404",
+		Domain:      "copilot.tencent.com",
+	}
+	result := newGrowthTestRunner().run(context.Background(), creds, "404 账号")
+
+	if result.Error == "" {
+		t.Fatal("a 404 on the task list should surface as an error")
+	}
+	var sawURL, sawStatus bool
+	for _, line := range result.Logs {
+		if strings.Contains(line.Message, "/v2/activity/growth/tasks") {
+			sawURL = true
+		}
+		if strings.Contains(line.Message, "404") {
+			sawStatus = true
+		}
+	}
+	if !sawURL {
+		t.Fatal("the log does not name the failing path")
+	}
+	if !sawStatus {
+		t.Fatal("the log does not report the status code")
+	}
+}
+
+func TestGrowthDiagnosticsAreBounded(t *testing.T) {
+	d := &growthDiagnostics{}
+	for i := 0; i < 100; i++ {
+		d.add("failure %d", i)
+	}
+	if got := len(d.snapshot()); got > 20 {
+		t.Fatalf("diagnostics kept %d lines, want at most 20", got)
+	}
+}
+
+func TestTruncateForLog(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	got := truncateForLog([]byte(long), 100)
+	if len(got) > 110 {
+		t.Fatalf("truncated length = %d, want ~100", len(got))
+	}
+	short := truncateForLog([]byte("hello"), 100)
+	if short != "hello" {
+		t.Fatalf("short body = %q, want unchanged", short)
 	}
 }
