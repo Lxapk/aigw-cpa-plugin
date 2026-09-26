@@ -77,6 +77,9 @@ type gatewaySettings struct {
 	LogRetentionDays int `json:"log_retention_days" yaml:"log_retention_days"`
 	// DefaultProvider mirrors defaultProvider: used when the requested model
 	// carries no explicit "provider/model" prefix.
+	// DefaultProvider is the provider used when a model name carries no
+	// explicit prefix.
+	//
 	DefaultProvider string `json:"default_provider" yaml:"default_provider"`
 	// DefaultModel is the model used when the client asks for "auto" or omits
 	// the model entirely, mirroring a2/b.java k()'s configured default.

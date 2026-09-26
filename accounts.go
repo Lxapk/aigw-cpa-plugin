@@ -40,6 +40,16 @@ type workBuddyAccount struct {
 	Domain string `json:"domain"`
 	// Region is the derived region key: "cn" or "global" (a2/b.java:284).
 	Region string `json:"region"`
+	// Regions lists every region this person holds a credential for, in the
+	// canonical order (国内在前). One account legitimately has both: the CN and
+	// global endpoints issue separate tokens for the same uid, so collapsing them
+	// into a single row loses the fact that both are available.
+	Regions []string `json:"regions,omitempty"`
+	// AuthIndexes lists every auth file backing this person, so the merged row
+	// can still be traced back to the individual credentials.
+	AuthIndexes []string `json:"auth_indexes,omitempty"`
+	// CredentialCount is how many stored credentials collapsed into this row.
+	CredentialCount int `json:"credential_count,omitempty"`
 	// EnterpriseID is the tenant, when present.
 	EnterpriseID string `json:"enterprise_id,omitempty"`
 	// ExpiresAt is the credential expiry as epoch seconds (0 when unknown).
@@ -174,10 +184,19 @@ func loadWorkBuddyAccounts() ([]workBuddyAccount, error) {
 		if errParse != nil {
 			// A codebuddy file we cannot parse is still worth showing, so the
 			// operator can see something is wrong with it.
+			//
+			// Recover whatever identity we can from the raw blob. Without this the
+			// row has no uid, so its dedupe key falls back to the auth index and it
+			// can never merge with the healthy record for the same person — which
+			// is what made one account appear several times in the panel.
+			recovered := recoverIdentityFromStorage(storage)
 			out = append(out, workBuddyAccount{
 				AuthIndex: entry.AuthIndex,
-				Label:     firstNonEmpty(entry.Label, entry.Name, entry.AuthIndex),
-				Region:    workBuddyRegion(""),
+				Label:     firstNonEmpty(entry.Label, entry.Name, recovered.nickname, recovered.uid, entry.AuthIndex),
+				UID:       recovered.uid,
+				Nickname:  recovered.nickname,
+				Domain:    recovered.domain,
+				Region:    workBuddyRegion(recovered.domain),
 				Usable:    false,
 				Reason:    "凭据无法解析",
 				Disabled:  entry.Disabled,
@@ -221,8 +240,54 @@ func loadWorkBuddyAccounts() ([]workBuddyAccount, error) {
 	return out, nil
 }
 
-// dedupeAccounts removes repeated credentials, keeping the most informative
-// entry of each group (the one with a parsed credential body and a label).
+// recoveredIdentity carries whatever identifying fields can be salvaged from a
+// credential blob that failed to parse.
+type recoveredIdentity struct {
+	uid      string
+	nickname string
+	domain   string
+}
+
+// recoverIdentityFromStorage extracts uid/nickname/domain from a blob that
+// parseWorkBuddyCredentials rejected.
+//
+// It works on the raw JSON rather than a struct so that a partial or
+// differently-shaped file still yields an identity. The uid in particular is
+// what lets dedupeAccounts merge this row with the healthy record for the same
+// person; without it a broken file shows up as an extra account forever.
+//
+// When the body carries no uid, the JWT payload is consulted, mirroring the
+// fallback parseWorkBuddyCredentials already performs (a2/b.t()).
+func recoverIdentityFromStorage(storage []byte) recoveredIdentity {
+	if len(storage) == 0 {
+		return recoveredIdentity{}
+	}
+	var doc map[string]any
+	if errUnmarshal := json.Unmarshal(storage, &doc); errUnmarshal != nil {
+		return recoveredIdentity{}
+	}
+	out := recoveredIdentity{
+		uid:      pickString(doc, "uid", "userId", "user_id"),
+		nickname: pickString(doc, "nickname", "nickName", "name"),
+		domain:   pickString(doc, "domain"),
+	}
+	if out.uid == "" {
+		if token := pickString(doc, "accessToken", "access_token"); token != "" {
+			out.uid = jwtClaim(token, "user_id", "userId", "uid", "sub")
+		}
+	}
+	return out
+}
+
+// dedupeAccounts collapses repeated credentials for the same person.
+//
+// The host legitimately surfaces the same uid more than once: the CN
+// (copilot.tencent.com) and global (www.workbuddy.ai) endpoints issue separate
+// tokens, and a credential can additionally appear both from its auth file and
+// from the runtime index. Both cases looked like duplicated rows before.
+//
+// The surviving row keeps the richest credential but accumulates every region
+// and auth index it saw, so nothing about the merged credentials is lost.
 func dedupeAccounts(in []workBuddyAccount) []workBuddyAccount {
 	if len(in) < 2 {
 		return in
@@ -238,17 +303,69 @@ func dedupeAccounts(in []workBuddyAccount) []workBuddyAccount {
 		}
 		pos, seen := index[key]
 		if !seen {
+			a.Regions = appendRegion(a.Regions, a.Region)
+			a.AuthIndexes = appendAuthIndex(a.AuthIndexes, a.AuthIndex)
+			a.CredentialCount = 1
 			index[key] = len(out)
 			out = append(out, a)
 			continue
 		}
-		// Prefer the richer record: one with credentials, then one with a
-		// human label.
-		if accountScore(a) > accountScore(out[pos]) {
-			out[pos] = a
+
+		// Merge into the existing row: union of regions and auth indexes, and
+		// prefer the richer credential body.
+		merged := out[pos]
+		merged.Regions = appendRegion(merged.Regions, a.Region)
+		merged.AuthIndexes = appendAuthIndex(merged.AuthIndexes, a.AuthIndex)
+		merged.CredentialCount++
+		if accountScore(a) > accountScore(merged) {
+			// Keep the identity of the better record but carry over the union.
+			regions, indexes, count := merged.Regions, merged.AuthIndexes, merged.CredentialCount
+			a.Regions, a.AuthIndexes, a.CredentialCount = regions, indexes, count
+			merged = a
 		}
+		// The row is usable if any of its credentials is.
+		merged.Usable = merged.Usable || a.Usable
+		if merged.Credits < a.Credits {
+			merged.Credits = a.Credits
+			merged.CreditsKnown = merged.CreditsKnown || a.CreditsKnown
+		}
+		merged.CreditsKnown = merged.CreditsKnown || a.CreditsKnown
+		// Prefer a real region over the default when the survivor had none.
+		if merged.Region == "" && a.Region != "" {
+			merged.Region = a.Region
+		}
+		out[pos] = merged
 	}
 	return out
+}
+
+// appendRegion adds a region to the list once, keeping the canonical order so
+// the panel's grouping is stable.
+func appendRegion(list []string, region string) []string {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return list
+	}
+	for _, existing := range list {
+		if existing == region {
+			return list
+		}
+	}
+	return append(list, region)
+}
+
+// appendAuthIndex adds an auth file name to the list once.
+func appendAuthIndex(list []string, index string) []string {
+	index = strings.TrimSpace(index)
+	if index == "" {
+		return list
+	}
+	for _, existing := range list {
+		if existing == index {
+			return list
+		}
+	}
+	return append(list, index)
 }
 
 // accountIdentity derives the dedupe key: the provider uid when present, else

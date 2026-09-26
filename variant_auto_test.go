@@ -822,11 +822,14 @@ func TestModelIDsCarryTheProviderPrefix(t *testing.T) {
 	if len(models) != 2 {
 		t.Fatalf("got %d models", len(models))
 	}
-	if models[0].ID != "codebuddy/deepseek-v4.1-flash" {
-		t.Fatalf("ID = %q, want the prefixed form", models[0].ID)
+	// Models are published under their bare upstream ids: no "codebuddy/"
+	// prefix. The plugin advertises what the upstream accepts, so nothing has to
+	// be stripped before the call goes out.
+	if models[0].ID != "deepseek-v4.1-flash" {
+		t.Fatalf("ID = %q, want the bare id deepseek-v4.1-flash", models[0].ID)
 	}
 	// Casing is preserved: the upstream distinguishes models by exact spelling.
-	if models[1].ID != "codebuddy/DeepSeek-V4-Flash" {
+	if models[1].ID != "DeepSeek-V4-Flash" {
 		t.Fatalf("ID = %q, want casing preserved", models[1].ID)
 	}
 	// The bare name survives in Version so the upstream call stays correct.
@@ -835,17 +838,20 @@ func TestModelIDsCarryTheProviderPrefix(t *testing.T) {
 	}
 }
 
-// TestQualifyModelIDIsIdempotent guards against a double prefix.
+// TestQualifyModelIDIsIdempotent guards against a stray prefix surviving.
+//
+// Published names are bare upstream ids. A prefixed input still has to come out
+// bare, otherwise an older config or a cached entry would publish
+// "codebuddy/codebuddy/<model>".
 func TestQualifyModelIDIsIdempotent(t *testing.T) {
-	if got := qualifyModelID("deepseek-v4-flash"); got != "codebuddy/deepseek-v4-flash" {
-		t.Fatalf("qualifyModelID = %q", got)
+	if got := qualifyModelID("deepseek-v4-flash"); got != "deepseek-v4-flash" {
+		t.Fatalf("qualifyModelID = %q, want the bare id", got)
 	}
-	if got := qualifyModelID("codebuddy/deepseek-v4-flash"); got != "codebuddy/deepseek-v4-flash" {
-		t.Fatalf("a prefixed id gained the prefix again: %q", got)
+	if got := qualifyModelID("codebuddy/deepseek-v4-flash"); got != "deepseek-v4-flash" {
+		t.Fatalf("a prefixed id was not stripped: %q", got)
 	}
-	// The display name WorkBuddy maps to the same key, so it must not double up
-	// either.
-	if got := qualifyModelID("CodeBuddy/deepseek-v4-flash"); got != "CodeBuddy/deepseek-v4-flash" {
+	// The check is case-insensitive, so the display spelling is stripped too.
+	if got := qualifyModelID("CodeBuddy/deepseek-v4-flash"); got != "deepseek-v4-flash" {
 		t.Fatalf("a differently-cased prefix was not recognised: %q", got)
 	}
 }
@@ -873,8 +879,8 @@ func TestAdvertisedNameIsAcceptedByRoute(t *testing.T) {
 	resetState()
 
 	advertised := modelsToInfo([]workBuddyModel{{ID: "deepseek-v4.1-flash"}})[0].ID
-	if advertised != "codebuddy/deepseek-v4.1-flash" {
-		t.Fatalf("advertised id = %q", advertised)
+	if advertised != "deepseek-v4.1-flash" {
+		t.Fatalf("advertised id = %q, want the bare upstream id", advertised)
 	}
 
 	body, _ := json.Marshal(map[string]any{"model": advertised})
@@ -2167,5 +2173,93 @@ func TestDefaultProviderIsThisPlugin(t *testing.T) {
 	// only bites once someone turns it on.
 	if settings.EnforceDefaultProvider {
 		t.Fatal("enforce_default_provider should default off")
+	}
+}
+
+// ---- bare model ids --------------------------------------------------------
+
+// TestPublishedModelIdsAreBare pins the published spelling.
+//
+// Models are advertised under their bare upstream ids ("deepseek-v4-pro", not
+// "codebuddy/deepseek-v4-pro"). The plugin lists what the upstream accepts, so
+// no prefix has to be stripped on the way back out, and a client can copy a
+// name straight out of the model list into a request.
+func TestPublishedModelIdsAreBare(t *testing.T) {
+	resetState()
+
+	cases := map[string]string{
+		"deepseek-v4-pro":           "deepseek-v4-pro",
+		"codebuddy/deepseek-v4-pro": "deepseek-v4-pro",
+		"CodeBuddy/kimi-k3":         "kimi-k3",
+		"  glm-5.3  ":               "glm-5.3",
+		"DeepSeek-V4-Flash":         "DeepSeek-V4-Flash",
+	}
+	for in, want := range cases {
+		if got := qualifyModelID(in); got != want {
+			t.Errorf("qualifyModelID(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// And the whole path agrees: modelsToInfo carries the same bare id through.
+	info := modelsToInfo([]workBuddyModel{{ID: "deepseek-v4-pro"}})
+	if len(info) != 1 || info[0].ID != "deepseek-v4-pro" {
+		t.Fatalf("modelsToInfo = %+v, want the bare id", info)
+	}
+	// Version still holds the upstream spelling, which is what the call sends.
+	if info[0].Version != "deepseek-v4-pro" {
+		t.Errorf("Version = %q, want the upstream spelling", info[0].Version)
+	}
+}
+
+// ---- account merging -------------------------------------------------------
+
+// TestDedupeSameUidAcrossRegions covers one person holding both credentials.
+//
+// The CN (copilot.tencent.com) and global (www.workbuddy.ai) endpoints issue
+// separate tokens for the same uid, so the host surfaces the same person twice
+// and the panel used to show two rows. They are one account: merge them, but
+// keep every region and auth file so nothing is lost.
+func TestDedupeSameUidAcrossRegions(t *testing.T) {
+	in := []workBuddyAccount{
+		{AuthIndex: "codebuddy-u1-cn.json", UID: "u1", Region: "cn", Label: "a"},
+		{AuthIndex: "codebuddy-u1-ai.json", UID: "u1", Region: "global", Label: "b"},
+	}
+	out := dedupeAccounts(in)
+	if len(out) != 1 {
+		t.Fatalf("same uid should collapse to one row, got %d", len(out))
+	}
+	if len(out[0].Regions) != 2 {
+		t.Errorf("Regions = %v, want both cn and global", out[0].Regions)
+	}
+	if len(out[0].AuthIndexes) != 2 {
+		t.Errorf("AuthIndexes = %v, want both files", out[0].AuthIndexes)
+	}
+	if out[0].CredentialCount != 2 {
+		t.Errorf("CredentialCount = %d, want 2", out[0].CredentialCount)
+	}
+}
+
+// TestRecoverIdentityFromBrokenStorage covers the duplicate rows that persisted
+// forever: a credential that fails to parse used to keep no uid at all, so its
+// dedupe key fell back to the auth index and it could never merge with the
+// healthy record for the same person.
+func TestRecoverIdentityFromBrokenStorage(t *testing.T) {
+	storage := []byte(`{"accessToken":"at-1","uid":"u9","nickname":"小明",` +
+		`"domain":"www.workbuddy.ai","expiresAt":"not-a-number"}`)
+	got := recoverIdentityFromStorage(storage)
+	if got.uid != "u9" {
+		t.Errorf("uid = %q, want u9; without it the row can never be merged", got.uid)
+	}
+	if got.nickname != "小明" {
+		t.Errorf("nickname = %q", got.nickname)
+	}
+	if got.domain != "www.workbuddy.ai" {
+		t.Errorf("domain = %q", got.domain)
+	}
+
+	for _, in := range [][]byte{nil, {}, []byte("not json"), []byte(`{"foo":1}`)} {
+		if out := recoverIdentityFromStorage(in); out.uid != "" || out.nickname != "" {
+			t.Errorf("input %q should yield an empty identity, got %+v", in, out)
+		}
 	}
 }

@@ -239,12 +239,23 @@ func modelsToInfo(models []workBuddyModel) []pluginapi.ModelInfo {
 }
 
 // qualifyModelID prepends the provider key unless the name already carries it,
-// so an ID never gains the prefix twice.
+// so an ID never gains the prefix twice, or unless the operator asked for bare
+// names through model_prefix.
+// qualifyModelID returns the model name as the plugin publishes it.
+//
+// The name is the bare upstream id: "deepseek-v4-pro", not
+// "codebuddy/deepseek-v4-pro". CPA would derive a "<pluginID>/<model>" spelling
+// for the registry it builds itself, but callers read the names the plugin
+// advertises here, and an unprefixed name is what the upstream accepts, so
+// there is nothing to add and nothing to strip on the way back out.
 func qualifyModelID(native string) string {
+	native = strings.TrimSpace(native)
+	// Tolerate a prefixed input so an older config or cached entry cannot
+	// publish "codebuddy/codebuddy/<model>".
 	if strings.HasPrefix(strings.ToLower(native), workBuddyProviderKey+"/") {
-		return native
+		return native[len(workBuddyProviderKey)+1:]
 	}
-	return workBuddyProviderKey + "/" + native
+	return native
 }
 
 // nativeModelID strips a recognised provider prefix, yielding the name the
