@@ -71,6 +71,8 @@ type workBuddyAccount struct {
 	// Variant is "cn" or "ai", shown so the operator can see which service an
 	// account belongs to.
 	Variant string `json:"variant"`
+	// VariantLabel is Variant rendered for display ("国内版"/"国际版").
+	VariantLabel string `json:"variant_label"`
 
 	// CoolKind / Reason / CooldownUntil come from the pool when it has seen
 	// this credential; they are empty otherwise.
@@ -184,7 +186,7 @@ func loadWorkBuddyAccounts() ([]workBuddyAccount, error) {
 			UID:          creds.UID,
 			Nickname:     creds.Nickname,
 			Domain:       creds.Domain,
-			Region:       workBuddyRegion(creds.Domain),
+			Region:       workBuddyRegionForCredentials(creds),
 			EnterpriseID: creds.EnterpriseID,
 			ExpiresAt:    creds.ExpiresAt,
 			Expired:      creds.expired(),
@@ -322,7 +324,17 @@ func enrichWithRuntime(accounts []workBuddyAccount) []workBuddyAccount {
 		a := &accounts[i]
 
 		// Variant label for the UI.
-		a.Variant = string(variantForDomain(a.Domain))
+		//
+		// Variant stays the stable machine key ("cn"/"ai") that the script
+		// matches on, while VariantLabel carries the human text. The panel used
+		// to print the raw key next to buttons that already said 国内版/国际版,
+		// so the same account was described two different ways.
+		variant := variantForCredentials(a.credentials)
+		if a.credentials == nil {
+			variant = variantForDomain(a.Domain)
+		}
+		a.Variant = string(variant)
+		a.VariantLabel = variant.label()
 
 		// Quota: look the reading up by every identifier the credential has.
 		//

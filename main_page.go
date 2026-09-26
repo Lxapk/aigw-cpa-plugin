@@ -33,9 +33,10 @@ func renderTaskPage() string {
 	b.WriteString(`</div></div>`)
 
 	b.WriteString(`<div class="card"><div class="row">`)
-	b.WriteString(`<button type="button" onclick="runAllTasks()">全部执行</button>`)
+	b.WriteString(`<button type="button" id="btnRunAllTasks" onclick="runAllTasks()">全部执行</button>`)
 	b.WriteString(`<span class="muted small" id="taskMsg"></span>`)
 	b.WriteString(`</div></div>`)
+	b.WriteString(`<div id="taskResult"></div>`)
 
 	b.WriteString(`<div class="card"><h2>账号任务状态</h2>`)
 	if len(accounts) == 0 {
@@ -56,8 +57,11 @@ func renderTaskPage() string {
 			}
 			b.WriteString(`<tr><td><strong>` + html.EscapeString(label) + `</strong></td>`)
 			btnCls := "pill " + enableCls
+			// The button offers the opposite of the current state, so an enabled
+			// account gets "disable". The previous code derived the action from
+			// the current state instead, which made every click a no-op.
 			action := "enable"
-			if !enabled {
+			if enabled {
 				action = "disable"
 			}
 			b.WriteString(`<td><span class="` + btnCls + `" style="cursor:pointer" ` +
@@ -185,9 +189,20 @@ func renderMainPage() string {
 	stat("已查积分", fmt.Sprintf("%d / %d", known, total))
 	b.WriteString(`</div>`)
 
-	b.WriteString(`<div class="card"><h2>账号列表 <span class="hint">读取自 CPA 认证存储，登录后立即可见</span></h2>`)
+	b.WriteString(`<div class="card"><h2>账号列表 <span class="hint">读取自 CPA 认证存储，登录后自动出现</span></h2>`)
+	b.WriteString(`<input type="hidden" id="accountsSignature" value="` + html.EscapeString(accountsSignature(accounts)) + `">`)
+	b.WriteString(`<div class="muted small" id="accountsStamp"></div>`)
 	if len(accounts) == 0 {
-		b.WriteString(`<div class="empty">还没有 WorkBuddy 账号。请到 CPA 的「认证」页登录。</div>`)
+		// Distinguish "the host could not be read" from "there really is no
+		// account". Reporting the latter while the former is true sends the
+		// operator looking for a login problem that does not exist.
+		if warn := state.accounts.lastError(); warn != "" {
+			b.WriteString(`<div class="empty">账号列表读取失败，无法判断是否已有账号。请查看下方错误详情后重试。</div>`)
+		} else {
+			b.WriteString(`<div class="empty">还没有 WorkBuddy 账号。<br>` +
+				`请在 CPA 管理面板的 <strong>认证 / Auth</strong> 页选择 <strong>WorkBuddy</strong> 登录；` +
+				`登录完成后本列表会在数秒内自动出现该账号。</div>`)
+		}
 	} else {
 		b.WriteString(`<table><thead><tr>`)
 		b.WriteString(`<th>账号</th><th>UID</th><th>版本</th><th class="num">积分</th><th>到期</th><th>状态</th><th>操作</th></tr></thead><tbody>`)
@@ -222,7 +237,7 @@ func renderMainPage() string {
 			}
 			b.WriteString(`<tr><td><strong>` + html.EscapeString(a.Label) + `</strong></td>`)
 			b.WriteString(`<td><code>` + html.EscapeString(firstNonEmpty(a.UID, a.AuthIndex)) + `</code></td>`)
-			b.WriteString(`<td><span class="pill idle">` + html.EscapeString(a.Variant) + `</span></td>`)
+			b.WriteString(`<td><span class="pill idle">` + html.EscapeString(firstNonEmpty(a.VariantLabel, a.Variant, "—")) + `</span></td>`)
 			b.WriteString(`<td class="num">` + html.EscapeString(cv) + `</td>`)
 			b.WriteString(`<td class="` + expiryClass + `">` + html.EscapeString(expiry) + `</td>`)
 			b.WriteString(`<td><span class="pill ` + pillClass + `">` + statusText + `</span>`)
@@ -413,14 +428,44 @@ func renderMainPage() string {
 		if (opt.v == "auto" && curVariant == "") || opt.v == curVariant {
 			cls = ` class="active"`
 		}
-		b.WriteString(`<button type="button"` + cls + ` onclick="setVariant('` + opt.v + `')">` + opt.label + `</button>`)
+		b.WriteString(`<button type="button" data-variant="` + opt.v + `"` + cls + ` onclick="setVariant('` + opt.v + `')">` + opt.label + `</button>`)
 	}
 	b.WriteString(`</div>`)
-	b.WriteString(`<div class="note">选择后立即保存。</div>`)
+	b.WriteString(`<div class="note">作用于本插件对上游接口与域名的选择：<strong>自动</strong>按账号凭据识别（域名优先，其次 JWT 签发方），<strong>国内版</strong>/<strong>国际版</strong>则强制全部账号。</div>`)
+	b.WriteString(`<div class="note">该开关不会改写已登录账号的凭据，也不会重建账号池；若账号真实归属与所选版本不符，其签到与额度查询可能失败。国际版没有签到接口，该版本账号将自动跳过签到。</div>`)
 	b.WriteString(`<div class="muted small" id="variantMsg"></div>`)
 	b.WriteString(`</div>`)
 
 	b.WriteString(`</div>` + mainPageScript() + `</body></html>`)
+	return b.String()
+}
+
+// accountsSignature summarises an inventory for change detection.
+//
+// The browser polls /accounts and reloads only when this string changes, so the
+// Go and JS implementations must produce identical output for identical input.
+// Keep the two in sync: "total:usable:uid+state,..." with the entries in the
+// order the panel renders them.
+func accountsSignature(accounts []workBuddyAccount) string {
+	var b strings.Builder
+	usable := 0
+	for i := range accounts {
+		if accounts[i].Usable {
+			usable++
+		}
+	}
+	fmt.Fprintf(&b, "%d:%d:", len(accounts), usable)
+	for i := range accounts {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(firstNonEmpty(accounts[i].UID, accounts[i].AuthIndex))
+		if accounts[i].DisabledByUser {
+			b.WriteByte('D')
+		} else {
+			b.WriteByte('E')
+		}
+	}
 	return b.String()
 }
 
@@ -602,8 +647,8 @@ func handleAccountToggleRequest(req pluginapi.ManagementRequest) (managementResp
 	case "enable":
 		state.pool.disableAccountKeyed(body.UID, body.AuthIndex, false)
 	case "toggle":
-		lane := state.pool.findAccountKeyed(body.UID, body.AuthIndex)
-		if lane == nil {
+		lane, found := state.pool.findAccountKeyedCopy(body.UID, body.AuthIndex)
+		if !found {
 			state.pool.disableAccountKeyed(body.UID, body.AuthIndex, true)
 		} else {
 			state.pool.disableAccountKeyed(body.UID, body.AuthIndex, !lane.DisabledByUser)

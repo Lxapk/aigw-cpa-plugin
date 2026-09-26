@@ -243,8 +243,18 @@ func mainPageScript() string {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ variant: v })
     }).then(function () {
-      if (msg) { msg.textContent = '已切换为 ' + (v || '自动') + '，刷新列表后生效'; msg.className = 'small ok'; }
-      setTimeout(function () { location.reload(); }, 700);
+      // Update the segmented control in place. Reloading immediately used to
+      // wipe this confirmation after 700ms, which is why a successful switch
+      // looked like nothing had happened.
+      var seg = document.getElementById('variantSeg');
+      if (seg) {
+        var buttons = seg.getElementsByTagName('button');
+        for (var i = 0; i < buttons.length; i++) {
+          buttons[i].className = buttons[i].getAttribute('data-variant') === (v || 'auto') ? 'active' : '';
+        }
+      }
+      if (msg) { msg.textContent = '已切换为 ' + (v === 'cn' ? '国内版' : v === 'ai' ? '国际版' : '自动识别') + '，账号归属已按新设置重新计算'; msg.className = 'small ok'; }
+      setTimeout(function () { location.reload(); }, 2500);
     }).catch(function (e) {
       if (msg) { msg.textContent = '设置失败：' + e.message; msg.className = 'small bad'; }
     });
@@ -265,11 +275,112 @@ func mainPageScript() string {
     });
   };
 
+  // ---- task tab --------------------------------------------------------
+  //
+  // These two handlers are referenced by the task tab markup. They were
+  // missing entirely, so every button on that tab threw a ReferenceError and
+  // the page showed nothing at all — the "任务 tab 点了没反应" report.
+  window.runAllTasks = function () {
+    var btn = document.getElementById('btnRunAllTasks');
+    var box = document.getElementById('taskResult');
+    if (btn) btn.disabled = true;
+    if (box) box.innerHTML = '';
+    msgSet('taskMsg', '执行中…', 'muted');
+
+    call(BASE + '/run', { method: 'POST' }).then(function (payload) {
+      var c = payload.checkin || {};
+      var extra = (c.skipped || 0) > 0 ? '，跳过 ' + c.skipped + ' 个' : '';
+      msgSet('taskMsg', '完成：签到成功 ' + (c.succeeded || 0) + ' / 失败 ' + (c.failed || 0) + extra, 'ok');
+      if (box) {
+        box.innerHTML = '<h2>本次结果</h2>' +
+          (payload.checkin ? renderCheckin(payload.checkin) : '') +
+          (payload.quota ? renderQuota(payload.quota) : '');
+      }
+      setTimeout(function () { location.reload(); }, 1500);
+    }).catch(function (e) {
+      msgSet('taskMsg', '执行失败：' + e.message, 'bad');
+    }).then(function () { if (btn) btn.disabled = false; });
+  };
+
+  // toggleAccountTask flips one account's task participation.
+  //
+  // It forwards to the same /account/toggle endpoint the account tab uses, so
+  // the task tab and the account tab can never disagree about an account's
+  // state. The caller passes the action to apply, not the current state.
+  window.toggleAccountTask = function (uid, action) {
+    msgSet('taskMsg', '操作中…', 'muted');
+    call(BASE + '/account/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: uid, action: action === 'enable' ? 'enable' : 'disable' })
+    }).then(function () {
+      msgSet('taskMsg', '已完成', 'ok');
+      setTimeout(function () { location.reload(); }, 500);
+    }).catch(function (e) {
+      msgSet('taskMsg', '操作失败：' + e.message, 'bad');
+    });
+  };
+
+  // ---- auto refresh ----------------------------------------------------
+  //
+  // The account list used to update only when the operator pressed 刷新列表.
+  // A login completed in CPA's own Auth page therefore stayed invisible until a
+  // manual reload, which read as "账号不同步". Poll the inventory while the
+  // accounts tab is visible; the host call is cached for 5s server-side, so a
+  // 20s interval is cheap.
+  var AUTO_REFRESH_MS = 20000;
+  var autoRefreshTimer = null;
+
+  function accountsTabVisible() {
+    var panel = document.getElementById('tab-accounts');
+    return !!panel && panel.classList.contains('active');
+  }
+
+  function pollAccounts() {
+    if (!key() || !accountsTabVisible()) return;
+    call(BASE + '/accounts').then(function (d) {
+      var stamp = document.getElementById('accountsStamp');
+      if (stamp) {
+        stamp.textContent = '账号 ' + (d.total || 0) + ' 个，可用 ' + (d.usable || 0) +
+          ' 个 · 数据读取于 ' + new Date().toLocaleTimeString();
+      }
+      // Only reload when the inventory actually changed, so a steady state
+      // does not keep yanking the page out from under the operator.
+      var current = document.getElementById('accountsSignature');
+      var list = d.accounts || [];
+      var usableCount = 0;
+      var parts = [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].usable) usableCount++;
+        parts.push((list[i].uid || list[i].auth_index || '') + (list[i].disabled_by_user ? 'D' : 'E'));
+      }
+      // Must match accountsSignature() in main_page.go exactly.
+      var signature = list.length + ':' + usableCount + ':' + parts.join(',');
+      if (current && current.value && current.value !== signature) {
+        location.reload();
+        return;
+      }
+      if (current) current.value = signature;
+    }).catch(function () { /* transient; the next tick retries */ });
+  }
+
+  function startAutoRefresh() {
+    if (autoRefreshTimer) return;
+    autoRefreshTimer = setInterval(pollAccounts, AUTO_REFRESH_MS);
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     refreshKeyState();
     restoreTab();
+    startAutoRefresh();
+    pollAccounts();
   });
-  if (document.readyState !== 'loading') { refreshKeyState(); restoreTab(); }
+  if (document.readyState !== 'loading') {
+    refreshKeyState();
+    restoreTab();
+    startAutoRefresh();
+    pollAccounts();
+  }
 })();
 </script>`
 

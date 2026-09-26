@@ -61,6 +61,12 @@ type gatewaySettings struct {
 	// SoftCooldownMillis mirrors softCooldownMillis: cooldown applied after a
 	// single transient failure.
 	SoftCooldownMillis int64 `json:"soft_cooldown_millis" yaml:"soft_cooldown_millis"`
+	// RateCooldownMillis is this plugin's addition: cooldown applied after a
+	// 429/throttle. The app folds a rate limit into quotaCooldownMillis, which
+	// parked a merely throttled credential for 12h and zeroed its balance;
+	// a throttle is transient, so it gets its own (shorter) window and leaves
+	// Credits untouched.
+	RateCooldownMillis int64 `json:"rate_cooldown_millis" yaml:"rate_cooldown_millis"`
 	// ErrorThreshold mirrors errorThreshold: consecutive failures required
 	// before a credential is parked.
 	ErrorThreshold int `json:"error_threshold" yaml:"error_threshold"`
@@ -107,6 +113,7 @@ func defaultGatewaySettings() gatewaySettings {
 		MaxRotate:           3,
 		QuotaCooldownMillis: 43_200_000,
 		SoftCooldownMillis:  60_000,
+		RateCooldownMillis:  300_000,
 		ErrorThreshold:      3,
 		ErrorCooldownMillis: 600_000,
 		LogRetentionDays:    30,
@@ -136,6 +143,9 @@ func (g *gatewaySettings) applyDefaults() {
 	}
 	if g.SoftCooldownMillis <= 0 {
 		g.SoftCooldownMillis = d.SoftCooldownMillis
+	}
+	if g.RateCooldownMillis <= 0 {
+		g.RateCooldownMillis = d.RateCooldownMillis
 	}
 	if g.ErrorThreshold < 1 {
 		g.ErrorThreshold = d.ErrorThreshold

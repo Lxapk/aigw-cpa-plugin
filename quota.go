@@ -60,14 +60,30 @@ type quotaRefreshResult struct {
 const quotaHistoryMax = 20
 
 func newQuotaState() *quotaState {
-	return &quotaState{byAuth: make(map[string]*workBuddyQuota), stopCh: make(chan struct{})}
+	return &quotaState{byAuth: make(map[string]*workBuddyQuota), stopCh: make(chan struct{}, 1)}
 }
 
 // ---- region labelling (a2/b.java:284) ------------------------------------
 
 // workBuddyRegion ports D()'s return value for display purposes.
+// workBuddyRegion ports D()'s return value for display purposes.
+//
+// It resolves through the variant layer rather than testing the domain
+// directly, so the region shown next to a credential always agrees with the
+// variant the plugin actually routes it to. Testing the domain alone ignored a
+// forced override: with 「国际版」 selected, every account kept reporting "cn"
+// even though its requests were going to workbuddy.ai.
 func workBuddyRegion(domain string) string {
-	if isWorkBuddyGlobalDomain(domain) {
+	if variantFromDomainOnly(domain) == variantAi {
+		return "global"
+	}
+	return "cn"
+}
+
+// workBuddyRegionForCredentials labels a credential using the full detection
+// chain (override, then domain, then JWT issuer).
+func workBuddyRegionForCredentials(creds *workBuddyCredentials) string {
+	if variantForCredentials(creds) == variantAi {
 		return "global"
 	}
 	return "cn"
@@ -99,7 +115,7 @@ func fetchQuotaOne(account checkinAccount) quotaRefreshResult {
 		Label:     account.Label,
 		UID:       account.Creds.UID,
 		Domain:    account.Creds.Domain,
-		Region:    workBuddyRegion(account.Creds.Domain),
+		Region:    workBuddyRegionForCredentials(account.Creds),
 		FetchedAt: time.Now(),
 	}
 
@@ -206,9 +222,15 @@ func quotaLoop() {
 	defer ticker.Stop()
 
 	// Startup pass so the page has data without waiting a whole interval.
+	//
+	// It runs through guardLoop like every scheduled tick: an unguarded panic in
+	// the startup pass would kill this goroutine before the select loop is ever
+	// reached, leaving the scheduler permanently dead with no visible symptom.
 	cfg := state.settings.get().Quota
 	if cfg.Enabled && cfg.RefreshOnStart {
-		_, _ = runQuotaRefresh("startup")
+		guardLoop("quota-startup", func() {
+			_, _ = runQuotaRefresh("startup")
+		})
 	}
 
 	for {
@@ -251,6 +273,11 @@ func stopQuotaScheduler() {
 	if !started {
 		return
 	}
+	// stopCh is buffered, so the send always succeeds. The loop may be busy in
+	// quotaTick() rather than parked on the select; with an unbuffered channel
+	// the select/default below would silently drop the signal, and the caller
+	// would believe a loop was stopped while it kept running (a restart then
+	// produced two loops).
 	select {
 	case state.quota.stopCh <- struct{}{}:
 	default:
@@ -504,6 +531,8 @@ func coolKindName(k coolKind) string {
 		return "SOFT"
 	case coolKindError:
 		return "ERROR"
+	case coolKindRate:
+		return "RATE"
 	}
 	return ""
 }

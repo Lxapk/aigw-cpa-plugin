@@ -11,6 +11,10 @@ import (
 //	QUOTA(0)  credits exhausted
 //	SOFT(1)   transient failure, short cooldown
 //	ERROR(2)  hard error
+//
+// RATE is this plugin's addition. The app folds a 429 into QUOTA, but the two
+// have opposite meanings for the remaining balance, so the pool tracks them
+// separately instead of zeroing Credits on every throttle.
 type coolKind int
 
 const (
@@ -18,6 +22,7 @@ const (
 	coolKindQuota coolKind = iota
 	coolKindSoft
 	coolKindError
+	coolKindRate
 )
 
 // credentialLane mirrors one entry of the app's account pool.
@@ -114,12 +119,8 @@ func (p *credentialPool) disableAccountKeyed(uid, authIndex string, disabled boo
 	if key == "" {
 		return
 	}
-	p.lanes[laneKey(workBuddyProviderKey, key)] = &credentialLane{
-		Provider:       workBuddyProviderKey,
-		UID:            key,
-		DisabledByUser: disabled,
-		Enabled:        true,
-	}
+	lane := p.laneLocked(workBuddyProviderKey, key)
+	lane.DisabledByUser = disabled
 }
 
 // findAccount returns a lane by uid, or nil.
@@ -127,8 +128,33 @@ func (p *credentialPool) findAccount(uid string) *credentialLane {
 	return p.findAccountKeyed(uid, "")
 }
 
+// findAccountKeyedCopy returns a snapshot copy of the first lane matching uid
+// or the CPA auth index. See disableAccountKeyed for why both keys are
+// consulted.
+//
+// It returns a value rather than the pooled *credentialLane on purpose: lanes
+// are mutated in place under p.mu by success/failure/observe, so handing the
+// pointer to a caller that reads fields after the lock is dropped is a data
+// race. Callers that only need to read state must use this copy.
+func (p *credentialPool) findAccountKeyedCopy(uid, authIndex string) (credentialLane, bool) {
+	if uid == "" && authIndex == "" {
+		return credentialLane{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, lane := range p.lanes {
+		if (uid != "" && lane.UID == uid) || (authIndex != "" && lane.UID == authIndex) {
+			return *lane, true
+		}
+	}
+	return credentialLane{}, false
+}
+
 // findAccountKeyed returns the first lane matching uid or the CPA auth index,
 // or nil. See disableAccountKeyed for why both keys are consulted.
+//
+// Deprecated: the returned pointer aliases pool state and must not be read
+// after p.mu is released. Prefer findAccountKeyedCopy.
 func (p *credentialPool) findAccountKeyed(uid, authIndex string) *credentialLane {
 	if uid == "" && authIndex == "" {
 		return nil
@@ -145,9 +171,12 @@ func (p *credentialPool) findAccountKeyed(uid, authIndex string) *credentialLane
 
 // isAccountDisabled reports whether any pool lane matching uid/authIndex is
 // manually disabled by the operator (or permanently parked by the host).
+//
+// The check runs entirely under p.mu via findAccountKeyedCopy so it never
+// races with the writers that mutate lane fields in place.
 func (p *credentialPool) isAccountDisabled(uid, authIndex string) bool {
-	lane := p.findAccountKeyed(uid, authIndex)
-	return lane != nil && (lane.DisabledByUser || lane.Disabled)
+	lane, ok := p.findAccountKeyedCopy(uid, authIndex)
+	return ok && (lane.DisabledByUser || lane.Disabled)
 }
 
 //	!d.disabled && d.enabled && now >= d.untilMillis
@@ -322,15 +351,26 @@ func (p *credentialPool) failure(provider, uid string, kind failureKind, reason 
 		// The app labels a quota/rate rejection as QUOTA
 		// (V1/k.java:164 passes W1.b.f3822d with quotaCooldownMillis).
 		lane.ConsecutiveErrors++
-		lane.CooldownUntil = now.Add(time.Duration(settings.QuotaCooldownMillis) * time.Millisecond)
 		lane.StatusMessage = reason
-		if kind == failureQuota || kind == failureRate {
-			lane.CoolKind = coolKindQuota
+		switch kind {
+		case failureQuota:
 			// A quota rejection means the credits are gone; reflecting that
 			// keeps the selection order honest (A0/s.java:596).
+			lane.CoolKind = coolKindQuota
+			lane.CooldownUntil = now.Add(time.Duration(settings.QuotaCooldownMillis) * time.Millisecond)
 			lane.Credits = 0
-		} else {
+			lane.CreditsKnown = true
+		case failureRate:
+			// A 429 is transient: it says nothing about the remaining balance.
+			// Zeroing Credits here permanently demoted a merely throttled
+			// account under by_credits selection and, because CreditsKnown
+			// stayed true, made it look "known empty" rather than unknown.
+			// Keep the last known figure and use the rate cooldown.
+			lane.CoolKind = coolKindRate
+			lane.CooldownUntil = now.Add(time.Duration(settings.RateCooldownMillis) * time.Millisecond)
+		default:
 			lane.CoolKind = coolKindError
+			lane.CooldownUntil = now.Add(time.Duration(settings.QuotaCooldownMillis) * time.Millisecond)
 		}
 	default:
 		// V1.k.c() cases 4,5,6: soft failure. Park only after errorThreshold

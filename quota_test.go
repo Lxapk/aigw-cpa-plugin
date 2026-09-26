@@ -283,13 +283,19 @@ func TestPoolCreditsRecordedByAuthID(t *testing.T) {
 
 // ---- cool kind (W1.b) --------------------------------------------------
 
+// TestFailureRecordsCoolKind pins the cool kind recorded per failure class.
+//
+// The app folded a 429 (rate) into QUOTA (A0/s.java via V1/k.java:164), so the
+// original expectation was coolKindQuota. That conflated "throttled" with
+// "balance exhausted", which also zeroed Credits on every throttle. The pool
+// now records RATE separately; see TestRateFailurePreservesCredits.
 func TestFailureRecordsCoolKind(t *testing.T) {
 	cases := map[string]struct {
 		kind failureKind
 		want coolKind
 	}{
 		"quota":     {failureQuota, coolKindQuota},
-		"rate":      {failureRate, coolKindQuota},
+		"rate":      {failureRate, coolKindRate},
 		"auth":      {failureAuth, coolKindError},
 		"transient": {failureTransient, coolKindSoft},
 	}
@@ -329,11 +335,65 @@ func TestQuotaFailureZeroesCredits(t *testing.T) {
 	}
 }
 
+// TestRateFailurePreservesCredits is the regression guard for the throttle
+// fix: a 429 is transient and says nothing about the remaining balance, so it
+// must not zero Credits the way a genuine quota rejection does.
+func TestRateFailurePreservesCredits(t *testing.T) {
+	p := newCredentialPool()
+	s := defaultGatewaySettings()
+	p.observe("codebuddy", "u", "")
+	p.setCredits("codebuddy", "u", 500, true)
+	p.failure("codebuddy", "u", failureRate, "429 too many requests", s, false)
+
+	p.mu.Lock()
+	lane := p.lanes[laneKey("codebuddy", "u")]
+	p.mu.Unlock()
+	if lane.Credits != 500 {
+		t.Fatalf("credits = %d, want 500 (a throttle must not clear the balance)", lane.Credits)
+	}
+	if !lane.CreditsKnown {
+		t.Fatal("CreditsKnown = false, want true (balance was known and unchanged)")
+	}
+	if lane.CoolKind != coolKindRate {
+		t.Fatalf("coolKind = %v, want coolKindRate", lane.CoolKind)
+	}
+}
+
+// TestToggleOnLaneNotInOrder covers the account-toggle path for a credential
+// that has never carried traffic. disableAccountKeyed used to insert straight
+// into p.lanes without appending to p.order, so snapshot() (which walks
+// p.order) never surfaced the lane and the panel showed the toggle as lost.
+func TestToggleOnLaneNotInOrder(t *testing.T) {
+	p := newCredentialPool()
+	p.disableAccountKeyed("u-never-seen", "", true)
+
+	snap := p.snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot has %d lanes, want 1 (toggle on a fresh key must be visible)", len(snap))
+	}
+	if snap[0].UID != "u-never-seen" || !snap[0].DisabledByUser {
+		t.Fatalf("snapshot lane = %+v, want the disabled u-never-seen lane", snap[0])
+	}
+	if !p.isAccountDisabled("u-never-seen", "") {
+		t.Fatal("isAccountDisabled = false, want true after disable")
+	}
+
+	// Re-enabling the same key must update the existing lane, not add a second.
+	p.disableAccountKeyed("u-never-seen", "", false)
+	if snap := p.snapshot(); len(snap) != 1 {
+		t.Fatalf("snapshot has %d lanes after re-enable, want 1", len(snap))
+	}
+	if p.isAccountDisabled("u-never-seen", "") {
+		t.Fatal("isAccountDisabled = true, want false after re-enable")
+	}
+}
+
 func TestCoolKindName(t *testing.T) {
 	cases := map[coolKind]string{
 		coolKindQuota: "QUOTA",
 		coolKindSoft:  "SOFT",
 		coolKindError: "ERROR",
+		coolKindRate:  "RATE",
 		coolKindNone:  "",
 	}
 	for kind, want := range cases {

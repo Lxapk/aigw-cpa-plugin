@@ -35,6 +35,10 @@ var allVariants = []wbVariant{variantCn, variantAi}
 //
 // Mirrors has_ai_domain_suffix(): only a real ".workbuddy.ai" suffix counts, so
 // lookalike domains ("workbuddy.ai.evil") are not misclassified.
+//
+// Deprecated: prefer variantForCredentials, which also consults the JWT issuer.
+// Many domestic credentials carry an empty domain, and the domain-only check
+// silently labelled every one of them "cn" even when the token said otherwise.
 func variantForDomain(domain string) wbVariant {
 	override := state.settings.get().VariantOverride
 	if override == "ai" {
@@ -43,11 +47,111 @@ func variantForDomain(domain string) wbVariant {
 	if override == "cn" {
 		return variantCn
 	}
+	return variantFromDomainOnly(domain)
+}
+
+// variantFromDomainOnly is the domain half of the detection, with no override
+// and no token signal. It is what the app's a2/b.java:284 D() does.
+func variantFromDomainOnly(domain string) wbVariant {
 	d := strings.ToLower(strings.TrimSpace(domain))
 	if d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai") {
 		return variantAi
 	}
 	return variantCn
+}
+
+// variantForCredentials resolves the variant of a stored credential.
+//
+// Signal order, ported from the reference implementation's
+// detect_realm_from_token() (wb_accounts.py:162):
+//
+//  1. the domain, when it is a recognised WorkBuddy host;
+//  2. the JWT issuer, which is the only signal left for credentials whose
+//     domain field was never populated;
+//  3. the default, which — unlike the app — is 国内版, because a credential
+//     that reached this plugin came through the Tencent login flow unless its
+//     domain explicitly says otherwise.
+//
+// The reference implementation treats any cn marker anywhere in the domain or
+// issuer as decisive, so a genuinely ambiguous credential is classified cn
+// rather than being left unclassified.
+func variantForCredentials(creds *workBuddyCredentials) wbVariant {
+	override := state.settings.get().VariantOverride
+	if override == "ai" {
+		return variantAi
+	}
+	if override == "cn" {
+		return variantCn
+	}
+	if creds == nil {
+		return variantCn
+	}
+	if isWorkBuddyGlobalDomain(creds.Domain) {
+		return variantAi
+	}
+	if domainSaysCn(creds.Domain) {
+		return variantCn
+	}
+	// No usable domain: fall back to the token's issuer, which the reference
+	// implementation reads with the same substrings.
+	switch issuerRealm(creds.AccessToken) {
+	case "ai":
+		return variantAi
+	case "cn":
+		return variantCn
+	}
+	return variantCn
+}
+
+// domainSaysCn reports whether the domain carries a positive domestic marker.
+//
+// A bare "codebuddy.cn"/"copilot.tencent.com" substring is enough here (matching
+// the reference implementation) because the caller has already ruled out the
+// international suffix.
+func domainSaysCn(domain string) bool {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if d == "" {
+		return false
+	}
+	return strings.Contains(d, "codebuddy.cn") || strings.Contains(d, "copilot.tencent.com")
+}
+
+// issuerRealm classifies a JWT by its iss claim.
+//
+// Returns "" when the token is absent, unparseable, or its issuer is not a
+// recognised WorkBuddy host — an unreadable issuer must not be mistaken for a
+// positive international signal.
+func issuerRealm(accessToken string) string {
+	iss := strings.ToLower(strings.TrimSpace(jwtClaim(accessToken, "iss")))
+	if iss == "" {
+		return ""
+	}
+	if strings.Contains(iss, "copilot.tencent.com") || strings.Contains(iss, "codebuddy.cn") {
+		return "cn"
+	}
+	if strings.Contains(iss, "workbuddy.ai") || strings.Contains(iss, "codebuddy.ai") {
+		return "ai"
+	}
+	return ""
+}
+
+// detectVariantFromToken classifies a freshly issued token the way the
+// reference implementation's detect_realm_from_token does, so a login can be
+// labelled before any credential file exists.
+func detectVariantFromToken(accessToken, domain string) (wbVariant, string) {
+	if isWorkBuddyGlobalDomain(domain) {
+		return variantAi, "domain"
+	}
+	if domainSaysCn(domain) {
+		return variantCn, "domain"
+	}
+	if realm := issuerRealm(accessToken); realm != "" {
+		if realm == "ai" {
+			return variantAi, "issuer"
+		}
+		return variantCn, "issuer"
+	}
+	return variantCn, "default"
 }
 
 // isGlobalDomain keeps the historical helper name used elsewhere; it is the
@@ -62,6 +166,16 @@ func (v wbVariant) label() string {
 		return "国际版"
 	}
 	return "国内版"
+}
+
+// hasCheckin reports whether this variant exposes the daily check-in endpoint.
+//
+// Ported from the reference implementation's REALM_CONFIGS (wb_accounts.py:102
+// and :114): the international build has no check-in at all ("has_checkin":
+// False). Attempting one anyway spends a request that can only 404 and used to
+// surface as a spurious "签到失败" for every international account.
+func (v wbVariant) hasCheckin() bool {
+	return v != variantAi
 }
 
 // apiBase is the WorkBuddy API host for this variant.

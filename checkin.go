@@ -46,11 +46,15 @@ func defaultCheckinSettings() checkinSettings {
 
 // checkinResult is one account's outcome, as shown on the management page.
 type checkinResult struct {
-	AuthID    string    `json:"auth_id"`
-	Label     string    `json:"label"`
-	UID       string    `json:"uid"`
-	Domain    string    `json:"domain"`
-	Success   bool      `json:"success"`
+	AuthID  string `json:"auth_id"`
+	Label   string `json:"label"`
+	UID     string `json:"uid"`
+	Domain  string `json:"domain"`
+	Success bool   `json:"success"`
+	// Skipped marks an account the pass deliberately did not check in, such as
+	// an international credential with no check-in endpoint. It is distinct from
+	// a failure so the UI does not paint it red.
+	Skipped   bool      `json:"skipped,omitempty"`
 	Message   string    `json:"message"`
 	Already   bool      `json:"already_checked_in"`
 	Code      int       `json:"code"`
@@ -61,13 +65,16 @@ type checkinResult struct {
 
 // checkinRun is one pass over all accounts.
 type checkinRun struct {
-	StartedAt  time.Time       `json:"started_at"`
-	FinishedAt time.Time       `json:"finished_at"`
-	Trigger    string          `json:"trigger"` // "manual" | "auto" | "startup"
-	Total      int             `json:"total"`
-	Succeeded  int             `json:"succeeded"`
-	Failed     int             `json:"failed"`
-	Results    []checkinResult `json:"results"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	Trigger    string    `json:"trigger"` // "manual" | "auto" | "startup"
+	Total      int       `json:"total"`
+	Succeeded  int       `json:"succeeded"`
+	Failed     int       `json:"failed"`
+	// Skipped counts accounts the pass intentionally did not attempt, so that
+	// Total == Succeeded + Failed + Skipped always holds.
+	Skipped int             `json:"skipped,omitempty"`
+	Results []checkinResult `json:"results"`
 }
 
 // checkinState holds the scheduler + history.
@@ -89,7 +96,7 @@ type checkinState struct {
 const checkinHistoryMax = 20
 
 func newCheckinState() *checkinState {
-	return &checkinState{stopCh: make(chan struct{})}
+	return &checkinState{stopCh: make(chan struct{}, 1)}
 }
 
 // ---- account enumeration -------------------------------------------------
@@ -106,6 +113,15 @@ type checkinAccount struct {
 // The host exposes the auth-file inventory through host.auth.list; each entry's
 // storage is read with host.auth.get. Credentials we cannot parse are skipped
 // rather than failing the whole run.
+// collectCheckinAccounts enumerates the credentials this plugin owns.
+//
+// This is the single inventory used by the check-in pass, the quota refresh and
+// the task engine, so its filter decides what "this plugin's accounts" means
+// everywhere. It must therefore use the same strict rule as the panel's account
+// list (isWorkBuddyAuthEntry); an earlier version tested only provider/type,
+// which disagreed with the panel whenever a host exposed a credential solely
+// through its file name — the account showed up in the list but was missing
+// from quota totals and check-in.
 func collectCheckinAccounts() ([]checkinAccount, error) {
 	raw, errList := callHost("host.auth.list", map[string]any{})
 	if errList != nil {
@@ -117,7 +133,7 @@ func collectCheckinAccounts() ([]checkinAccount, error) {
 
 	var out []checkinAccount
 	for _, entry := range entries {
-		if !isWorkBuddyProvider(entry.Provider) && !isWorkBuddyProvider(entry.Type) {
+		if !isWorkBuddyAuthEntry(entry) {
 			continue
 		}
 		storage := entry.StorageJSON
@@ -210,9 +226,15 @@ func runCheckin(trigger string) *checkinRun {
 	for _, account := range accounts {
 		run.Total++
 		res := checkinOne(account, settings.Checkin)
-		if res.Success {
+		switch {
+		case res.Success:
 			run.Succeeded++
-		} else {
+		case res.Skipped:
+			// Deliberately not attempted (e.g. an international credential with
+			// no check-in endpoint); counting it as a failure would report a
+			// red run for a correct decision.
+			run.Skipped++
+		default:
 			run.Failed++
 		}
 		run.Results = append(run.Results, res)
@@ -226,12 +248,23 @@ func runCheckin(trigger string) *checkinRun {
 // checkinOne performs a single account's check-in, including the source app's
 // one-shot retry when the device fingerprint is rejected.
 func checkinOne(account checkinAccount, cfg checkinSettings) checkinResult {
+	variant := variantForCredentials(account.Creds)
 	res := checkinResult{
 		AuthID:    account.AuthID,
 		Label:     account.Label,
 		UID:       account.Creds.UID,
 		Domain:    account.Creds.Domain,
 		CheckedAt: time.Now(),
+	}
+
+	// The international build has no check-in endpoint (see
+	// wbVariant.hasCheckin), so sending one would only ever 404 and get
+	// reported as a failure for every international account. Report it as a
+	// skipped result instead of a fault.
+	if !variant.hasCheckin() {
+		res.Skipped = true
+		res.Message = "国际版无签到功能"
+		return res
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -334,9 +367,15 @@ func checkinLoop() {
 	defer ticker.Stop()
 
 	// Catch-up run at startup when configured.
+	//
+	// Guarded like the scheduled ticks: an unguarded panic here would end the
+	// goroutine before the select loop starts, so the scheduler would never run
+	// again and nothing would report why.
 	settings := state.settings.get()
 	if settings.Checkin.Enabled && settings.Checkin.OnStart && !checkinRanToday(settings.Checkin) {
-		runCheckin("startup")
+		guardLoop("checkin-startup", func() {
+			runCheckin("startup")
+		})
 	}
 
 	for {
@@ -354,7 +393,9 @@ func checkinLoop() {
 			if !checkinDueNow(cfg) {
 				continue
 			}
-			runCheckin("auto")
+			guardLoop("checkin-tick", func() {
+				runCheckin("auto")
+			})
 		}
 	}
 }
@@ -400,6 +441,9 @@ func stopCheckinScheduler() {
 	if !started {
 		return
 	}
+	// Buffered send: see stopQuotaScheduler. An unbuffered channel would drop
+	// the signal whenever the loop happened to be mid-check-in, leaving a
+	// running loop behind a "started = false" flag.
 	select {
 	case state.checkin.stopCh <- struct{}{}:
 	default:

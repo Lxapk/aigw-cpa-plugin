@@ -144,7 +144,7 @@ func newTaskEngine() *taskEngine {
 		queue:       make([]taskRequest, 0),
 		inFlight:    make(map[string]struct{}),
 		accounts:    make(map[string]*accountTasks),
-		stopCh:      make(chan struct{}),
+		stopCh:      make(chan struct{}, 1),
 	}
 }
 
@@ -381,7 +381,11 @@ func taskLoop() {
 	defer ticker.Stop()
 
 	// One immediate pass so tasks become visible without waiting a minute.
-	taskTick()
+	//
+	// Guarded like the scheduled ticks: an unguarded panic here would kill the
+	// goroutine before the select loop is reached, so tasks would silently stop
+	// being scheduled.
+	guardLoop("task-startup", taskTick)
 
 	for {
 		select {
