@@ -42,11 +42,15 @@ func interceptResponse(request []byte) ([]byte, error) {
 	if statusCode >= 400 {
 		upErr := classifyUpstream(statusCode, req.Body)
 		autoDisabled := false
-		if ctx.Provider != "" {
+		if ctx.Provider != "" && !isRequestContentFailure(upErr.Message) {
 			// A credential the upstream has rejected as invalid will not start
 			// working on the next attempt, so the account is retired rather
 			// than merely cooled down. Everything else (429, quota exhaustion,
 			// 5xx) is recoverable and keeps its cooldown.
+			//
+			// A malformed request is excluded outright: it describes the
+			// conversation, not the credential, so retrying it elsewhere fails
+			// identically and counting it parked every account in turn.
 			permanent := isPermanentFailure(statusCode, upErr)
 			// Pass the model so a throttle parks only the model that was asked
 			// for. The upstream reports it per model and tells the caller to
@@ -136,9 +140,13 @@ func interceptStreamChunk(request []byte) ([]byte, error) {
 		if ctx.Provider != "" {
 			upErr := classifyUpstream(http.StatusBadGateway, []byte(msg))
 			// Stream errors carry the same per-model throttle text, so scope the
-			// cooldown the same way instead of benching the whole account.
-			state.pool.failureForModel(ctx.Provider, ctx.UID, failedModelName(ctx),
-				upErr.Kind, upErr.Message, state.settings.get(), false)
+			// cooldown the same way instead of benching the whole account. A
+			// malformed request is skipped entirely: it is the client's to fix
+			// and would otherwise park every account that tried it.
+			if !isRequestContentFailure(upErr.Message) {
+				state.pool.failureForModel(ctx.Provider, ctx.UID, failedModelName(ctx),
+					upErr.Kind, upErr.Message, state.settings.get(), false)
+			}
 		}
 	}
 

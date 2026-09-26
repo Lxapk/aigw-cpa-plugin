@@ -41,7 +41,11 @@ func handleUsage(request []byte) ([]byte, error) {
 			if rec.Failure.StatusCode > 0 {
 				kind = classifyUpstream(rec.Failure.StatusCode, []byte(rec.Failure.Body)).Kind
 			}
-			state.pool.failure(provider, uid, kind, rec.Failure.Body, state.settings.get(), false)
+			// A malformed request is not a credential problem; see
+			// reportExecutorFailure.
+			if !isRequestContentFailure(rec.Failure.Body) {
+				state.pool.failureForModel(provider, uid, rec.Model, kind, rec.Failure.Body, state.settings.get(), false)
+			}
 		} else {
 			state.pool.success(provider, uid)
 		}

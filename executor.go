@@ -117,6 +117,28 @@ func prepareUpstreamBody(body []byte, requestedModel string) ([]byte, string, er
 // said no" apart from "the connection dropped".
 var errUpstreamFrameError = errors.New("upstream reported an error frame")
 
+// requestContentPhrases mark failures caused by the request's own shape rather
+// than by the credential.
+//
+// The upstream answers these with 5xx ("server_error") just like a throttle, so
+// they would otherwise accumulate as soft failures: three of them parked the
+// account, even though retrying the same malformed conversation on another
+// account fails identically. They are the client's to fix, and the upstream says
+// so ("please start a new conversation and retry").
+var requestContentPhrases = []string{
+	"tool calls and tool results do not match",
+	"tool_calls and tool_results do not match",
+	"please start a new conversation",
+	"request illegal",
+	"invalid_request_error",
+}
+
+// isRequestContentFailure reports whether the message describes a malformed
+// request.
+func isRequestContentFailure(message string) bool {
+	return containsAnyFold(message, requestContentPhrases)
+}
+
 // reportExecutorFailure records an upstream failure from inside the executor.
 //
 // The response interceptor is not reached when the executor itself answers with
@@ -143,6 +165,13 @@ func reportExecutorFailure(creds *workBuddyCredentials, model string, statusCode
 
 	upErr := classifyUpstream(statusCode, body)
 	if upErr.Kind == 0 {
+		return
+	}
+	// A malformed request is not evidence about the credential: retrying it on
+	// another account fails the same way, so counting it parked every account in
+	// turn and the client ended up with "no auth available" for a conversation it
+	// could have fixed itself.
+	if isRequestContentFailure(upErr.Message) {
 		return
 	}
 	state.pool.failureForModel(provider, uid, model, upErr.Kind, upErr.Message,

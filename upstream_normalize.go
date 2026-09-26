@@ -60,6 +60,9 @@ func normaliseUpstreamBody(body []byte) ([]byte, error) {
 	if repackToolResults(messages) {
 		changed = true
 	}
+	if repairToolCallIDs(messages) {
+		changed = true
+	}
 	if ensureLeadingSystemMessage(&messages) {
 		changed = true
 	}
@@ -74,6 +77,139 @@ func normaliseUpstreamBody(body []byte) ([]byte, error) {
 	}
 	doc["messages"] = encoded
 	return json.Marshal(doc)
+}
+
+// repairToolCallIDs re-links tool results to the calls they answer.
+//
+// The upstream validates the pairing and rejects the whole conversation with
+//
+//	tool calls and tool results do not match, please start a new conversation and retry
+//
+// when it does not hold. repackToolResults only fixes *adjacency*; the ids have to
+// line up as well, and clients get them wrong in three ways:
+//
+//  1. a tool result whose tool_call_id matches no call in the preceding assistant
+//     turn (a stale id, or one from a conversation branch that was edited)
+//  2. a tool result with no tool_call_id at all
+//  3. an assistant turn carrying tool_calls whose results never arrive
+//
+// Case 1 is repaired by pointing the result at the unmatched call still awaiting
+// one, in order. Case 2 gets the same id. Case 3 is reported as an unrepairable
+// mismatch, because inventing a result would put words in the tool's mouth.
+//
+// The error is retryable on a different account — it is a property of the
+// request, not of the credential — so callers must not count it against account
+// health. Returns whether anything was rewritten.
+func repairToolCallIDs(messages []map[string]json.RawMessage) bool {
+	if len(messages) < 2 {
+		return false
+	}
+	changed := false
+
+	// Ids offered by the most recent assistant turn, in order.
+	var pending []string
+	answered := map[string]bool{}
+
+	for _, message := range messages {
+		switch roleOf(message) {
+		case "assistant":
+			pending = assistantToolCallIDs(message)
+			answered = make(map[string]bool, len(pending))
+		case "tool":
+			if len(pending) == 0 {
+				// No call to answer; the upstream will reject this. Moving it
+				// would not help and dropping it would lose content, so leave it
+				// for the error path to report.
+				continue
+			}
+			current := toolResultID(message)
+			if current != "" && containsString(pending, current) && !answered[current] {
+				answered[current] = true
+				continue
+			}
+			// Case 1 or 2: link to the first call still awaiting a result.
+			next := ""
+			for _, id := range pending {
+				if !answered[id] {
+					next = id
+					break
+				}
+			}
+			if next == "" {
+				// Every call already has a result; a duplicate is not something
+				// to guess at.
+				continue
+			}
+			if setToolResultID(message, next) {
+				answered[next] = true
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// assistantToolCallIDs reads the ids of an assistant turn's tool_calls, in order.
+func assistantToolCallIDs(message map[string]json.RawMessage) []string {
+	if roleOf(message) != "assistant" {
+		return nil
+	}
+	rawCalls, okCalls := message["tool_calls"]
+	if !okCalls {
+		return nil
+	}
+	var calls []map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(rawCalls, &calls); errUnmarshal != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(calls))
+	for _, call := range calls {
+		rawID, okID := call["id"]
+		if !okID {
+			continue
+		}
+		var id string
+		if errUnmarshal := json.Unmarshal(rawID, &id); errUnmarshal != nil {
+			continue
+		}
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			ids = append(ids, trimmed)
+		}
+	}
+	return ids
+}
+
+// toolResultID reads a tool message's tool_call_id, empty when absent.
+func toolResultID(message map[string]json.RawMessage) string {
+	rawID, okID := message["tool_call_id"]
+	if !okID {
+		return ""
+	}
+	var id string
+	if errUnmarshal := json.Unmarshal(rawID, &id); errUnmarshal != nil {
+		return ""
+	}
+	return strings.TrimSpace(id)
+}
+
+// setToolResultID writes a tool message's tool_call_id. Reports whether it did.
+func setToolResultID(message map[string]json.RawMessage, id string) bool {
+	encoded, errMarshal := json.Marshal(id)
+	if errMarshal != nil {
+		return false
+	}
+	message["tool_call_id"] = encoded
+	return true
+}
+
+// containsString reports whether the slice holds the value.
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // normaliseRoles renames role values to the set the upstream accepts.

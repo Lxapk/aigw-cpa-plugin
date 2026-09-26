@@ -12,7 +12,7 @@ import (
 
 const (
 	pluginName    = "workbuddy"
-	pluginVersion = "0.13.29"
+	pluginVersion = "0.13.30"
 	pluginAuthor  = "BlackHawk"
 	pluginRepo    = "https://github.com/router-for-me/CLIProxyAPI"
 )

@@ -631,7 +631,80 @@ curl -N http://127.0.0.1:8317/v1/chat/completions \
 
 `data:` 前缀和 SSE 空行由 CPA 负责添加。
 
+### tool calls 不匹配被误判为账号故障（v0.13.30 修复）
+
+**用户看到的现象**：
+
+```
+tool calls and tool results do not match, please start a new conversation and retry
+```
+
+更麻烦的是**紧接着**出现：
+
+```
+auth_unavailable: no auth available
+```
+
+**换账号也没用** —— 于是看起来像账号全挂了。
+
+#### 缺陷 1：`tool_call_id` 从未被校验
+
+`repackToolResults` 只修**相邻性**（结果紧跟在 assistant 之后），但上游还要求
+**每个 `role:"tool"` 的 `tool_call_id` 必须对应某个 `tool_calls[].id`**。
+客户端在这一步出错很常见：
+
+| 情况 | 例子 |
+|---|---|
+| **id 过期** | 对话被编辑/回滚后留下的旧 id |
+| **缺失 id** | 只写了 `role:"tool"` 和 `content` |
+| **并行调用错位** | 两个调用两个结果，id 交叉 |
+
+**修复**：`repairToolCallIDs` 把结果**按顺序重连**到仍未被回答的调用上。
+
+**只改 id，不动内容**：已经正确的配对保持原样，多余的重复结果不去猜（交给错误路径报告）。
+
+#### 缺陷 2：请求的问题算在账号头上
+
+这个错误是 **502 + `server_error`**，与限流长得一样，于是落入软失败计数：
+**连续 3 次 → 账号被停**。
+
+**但这明明是请求的问题** —— **换个账号重试同样的对话会同样失败**，
+最终把所有账号逐个停掉，客户端就看到 `no auth available`。
+
+上游自己也在提示这是调用方要处理的：
+
+```
+please start a new conversation and retry
+```
+
+**修复**：`isRequestContentFailure` 识别这类文案，**不计入账号健康度**
+（`repairToolCallIDs` 修不了的部分才走到这里）。
+
+覆盖的文案：
+
+| 文案 | 含义 |
+|---|---|
+| `tool calls and tool results do not match` | 本问题 |
+| `request illegal` | 上游对不合规请求的通用拒绝 |
+| `invalid_request_error` | OpenAI 风格的请求错误 |
+
+**限流与配额不在其中** —— 它们确实是账号的问题，仍照常冷却。
+
+#### 实测
+
+```
+发一个 tool_call_id 不匹配的对话（stale_id_999 → 真实 id 是 call_real_1）
+  → {"content":"The current weather in Hangzhou is sunny with a temperature of 24°C…"}
+
+账号状态
+  ai: usable=True  账号级冷却=(无)
+```
+
+修复前这个请求会失败并把账号停掉；修复后**上游正常接受**，账号**完全不受影响**。
+
 ### 账号冷却中是否就「不能用了」（v0.13.29 修复）
+
+
 
 **用户看到的现象**：某个模型被限流后，账号看起来**整个不可用**，只能换账号。
 
