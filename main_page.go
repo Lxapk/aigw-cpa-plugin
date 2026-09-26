@@ -615,7 +615,26 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 // ---- variant endpoint --------------------------------------------------
 
 func handleVariantRequest(req pluginapi.ManagementRequest) (managementResponse, bool) {
-	if method := strings.ToUpper(strings.TrimSpace(req.Method)); method != http.MethodPost {
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+
+	// GET reports the current override; the panel reads it on load.
+	if method == http.MethodGet {
+		current := state.settings.get().VariantOverride
+		label := "自动识别"
+		switch current {
+		case "cn":
+			label = "国内版"
+		case "ai":
+			label = "国际版"
+		}
+		return managementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    jsonResponseHeaders(),
+			Body:       mustJSON(map[string]any{"ok": true, "variant": current, "label": label}),
+		}, true
+	}
+
+	if method != http.MethodPost {
 		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
 	}
 	var body struct {

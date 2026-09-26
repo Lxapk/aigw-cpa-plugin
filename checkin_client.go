@@ -55,11 +55,15 @@ type checkinOutcome struct {
 }
 
 // workBuddyCheckinBase ports the base selection used by the check-in call
-// (smali a2/b.smali:2660-2675): global -> workbuddy.ai, otherwise codebuddy.cn.
+// (smali a2/b.smi:2660-2675): global -> workbuddy.ai, otherwise codebuddy.cn.
+//
+// Resolution goes through the variant layer so a forced override is honoured: a
+// credential with an empty domain used to be pinned to the domestic host even
+// when the operator had selected 国际版.
 //
 // The cn branch is redirectable so tests can point it at a local server.
 func workBuddyCheckinBase(domain string) string {
-	if isWorkBuddyGlobalDomain(domain) {
+	if variantForCredentials(&workBuddyCredentials{Domain: domain}) == variantAi {
 		return workBuddyGlobalBase()
 	}
 	return checkinBaseForTest()

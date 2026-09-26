@@ -110,8 +110,10 @@ func (q *workBuddyQuota) expired() bool {
 //
 // Note this is the codebuddy.cn host, unlike chat/models which use
 // copilot.tencent.com.
+//
+// Resolution goes through the variant layer so a forced override is honoured.
 func workBuddyQuotaBase(domain string) string {
-	if isWorkBuddyGlobalDomain(domain) {
+	if variantForCredentials(&workBuddyCredentials{Domain: domain}) == variantAi {
 		return workBuddyGlobalBase()
 	}
 	return checkinBaseForTest()

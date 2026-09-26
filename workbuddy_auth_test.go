@@ -395,7 +395,7 @@ func TestPollWorkBuddyLoginPendingSentinel(t *testing.T) {
 	restore := pointWorkBuddyAt(server.URL)
 	defer restore()
 
-	creds, err := pollWorkBuddyLogin("state-1")
+	creds, err := pollWorkBuddyLogin("state-1", variantCn)
 	if err != nil {
 		t.Fatalf("pending must not be an error, got %v", err)
 	}
@@ -420,7 +420,7 @@ func TestPollWorkBuddyLoginSuccess(t *testing.T) {
 	restore := pointWorkBuddyAt(server.URL)
 	defer restore()
 
-	creds, err := pollWorkBuddyLogin("state-ok")
+	creds, err := pollWorkBuddyLogin("state-ok", variantCn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestPollWorkBuddyLoginErrorCode(t *testing.T) {
 	restore := pointWorkBuddyAt(server.URL)
 	defer restore()
 
-	_, err := pollWorkBuddyLogin("state-bad")
+	_, err := pollWorkBuddyLogin("state-bad", variantCn)
 	if err == nil {
 		t.Fatal("expected error for non-zero non-pending code")
 	}
@@ -462,7 +462,7 @@ func TestPollWorkBuddyLoginSuccessWithoutData(t *testing.T) {
 	defer restore()
 
 	// N1/B.java: "登录响应缺少 data".
-	if _, err := pollWorkBuddyLogin("s"); err == nil || !strings.Contains(err.Error(), "缺少 data") {
+	if _, err := pollWorkBuddyLogin("s", variantCn); err == nil || !strings.Contains(err.Error(), "缺少 data") {
 		t.Fatalf("expected missing-data error, got %v", err)
 	}
 }
@@ -477,7 +477,7 @@ func TestPollWorkBuddyLoginHTTPError(t *testing.T) {
 	defer restore()
 
 	// N1/B.java: "轮询失败（HTTP <code>）".
-	if _, err := pollWorkBuddyLogin("s"); err == nil || !strings.Contains(err.Error(), "轮询失败") {
+	if _, err := pollWorkBuddyLogin("s", variantCn); err == nil || !strings.Contains(err.Error(), "轮询失败") {
 		t.Fatalf("expected http error, got %v", err)
 	}
 }
@@ -496,8 +496,11 @@ func TestAuthLoginStartReturnsURLAndState(t *testing.T) {
 		if r.URL.Query().Get("platform") != "CLI" {
 			t.Errorf("platform query = %q", r.URL.Query().Get("platform"))
 		}
-		if r.Header.Get("User-Agent") != codebuddyUA {
-			t.Errorf("UA = %q", r.Header.Get("User-Agent"))
+		if r.Header.Get("User-Agent") != "WorkBuddy/5.5.6" {
+			t.Errorf("UA = %q, want the domestic WorkBuddy agent", r.Header.Get("User-Agent"))
+		}
+		if r.Header.Get("X-Domain") != "copilot.tencent.com" {
+			t.Errorf("X-Domain = %q, want copilot.tencent.com", r.Header.Get("X-Domain"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":0,"data":{"state":"st-1","authUrl":"https://copilot.tencent.com/login?state=st-1"}}`))

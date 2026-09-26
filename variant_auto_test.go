@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // This file covers the automatic cn/ai detection added on top of the original
@@ -568,5 +570,278 @@ func TestTruncateForLog(t *testing.T) {
 	short := truncateForLog([]byte("hello"), 100)
 	if short != "hello" {
 		t.Fatalf("short body = %q, want unchanged", short)
+	}
+}
+
+// ---- route registration --------------------------------------------------
+
+// TestEveryHandledRouteIsRegistered is the guard for the 404 class of bug.
+//
+// CPA dispatches management calls through an exact route table built from
+// managementRegistration(). A path the plugin implements but does not declare
+// there is answered 404 by the host before the handler is ever called, so the
+// symptom is indistinguishable from a wrong upstream URL.
+//
+// The growth endpoints were exactly that: implemented, wired into the switch,
+// and unreachable. This test cross-checks the declared table against the paths
+// the handler actually dispatches, so a future addition cannot silently miss
+// the registration.
+func TestEveryHandledRouteIsRegistered(t *testing.T) {
+	declared := make(map[string]bool)
+	for _, route := range managementRegistration().Routes {
+		declared[strings.ToUpper(route.Method)+" "+route.Path] = true
+	}
+
+	// Every path the panel calls, with the method it uses.
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/workbuddy/accounts"},
+		{http.MethodGet, "/workbuddy/status"},
+		{http.MethodGet, "/workbuddy/calls"},
+		{http.MethodGet, "/workbuddy/routing/status"},
+		{http.MethodPost, "/workbuddy/routing/config"},
+		{http.MethodPost, "/workbuddy/routing/reset"},
+		{http.MethodPost, "/workbuddy/run"},
+		{http.MethodGet, "/workbuddy/variant"},
+		{http.MethodPost, "/workbuddy/variant"},
+		{http.MethodPost, "/workbuddy/account/toggle"},
+		{http.MethodGet, "/workbuddy/quota"},
+		{http.MethodGet, "/workbuddy/quota/status"},
+		{http.MethodPost, "/workbuddy/quota/refresh"},
+		{http.MethodPost, "/workbuddy/quota/config"},
+		{http.MethodGet, "/workbuddy/checkin"},
+		{http.MethodPost, "/workbuddy/checkin"},
+		{http.MethodGet, "/workbuddy/checkin/status"},
+		{http.MethodPost, "/workbuddy/checkin/run"},
+		{http.MethodPost, "/workbuddy/checkin/config"},
+		// The growth endpoints are the ones that regressed.
+		{http.MethodGet, "/workbuddy/growth/tasks"},
+		{http.MethodGet, "/workbuddy/growth/summary"},
+		{http.MethodPost, "/workbuddy/growth/run"},
+		{http.MethodPost, "/workbuddy/growth/travel"},
+	}
+	for _, c := range cases {
+		key := c.method + " " + c.path
+		if !declared[key] {
+			t.Errorf("%s is called by the panel but not declared in managementRegistration()", key)
+		}
+	}
+}
+
+// TestGrowthRoutesReachTheHandler proves the declared growth routes actually
+// dispatch, rather than 404ing on an unhandled path.
+func TestGrowthRoutesReachTheHandler(t *testing.T) {
+	resetState()
+
+	// No accounts exist, so the handler answers a business error. The point is
+	// that it answers at all: an unregistered path would not reach here.
+	req := pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/workbuddy/growth/tasks",
+	}
+	resp, handled := handleMainRequest(req)
+	if !handled {
+		t.Fatal("GET /workbuddy/growth/tasks was not handled, so CPA would answer 404")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// And the normalised path must resolve to the growth branch.
+	if got := normaliseManagementPath("/v0/management/workbuddy/growth/tasks"); got != "/growth/tasks" {
+		t.Fatalf("normaliseManagementPath = %q, want /growth/tasks", got)
+	}
+}
+
+// ---- auth realm separation -----------------------------------------------
+
+// TestAuthHostFollowsVariant pins the rule the reference implementation applies
+// in start_login: the host that issues a credential is the host that serves it
+// afterwards. Minting a cn credential while the account is routed to the
+// international endpoints (or vice versa) produces an account whose token is
+// rejected by every later call — the "账号不通用" symptom.
+func TestAuthHostFollowsVariant(t *testing.T) {
+	resetState()
+
+	cn := authHostFor(variantCn)
+	if !strings.Contains(cn, "copilot.tencent.com") {
+		t.Fatalf("cn auth host = %q, want copilot.tencent.com", cn)
+	}
+	intl := authHostFor(variantAi)
+	if !strings.Contains(intl, "workbuddy.ai") {
+		t.Fatalf("intl auth host = %q, want workbuddy.ai", intl)
+	}
+	if cn == intl {
+		t.Fatal("both realms resolve to the same auth host, so the credential realm is ambiguous")
+	}
+}
+
+// TestAuthVariantFromRequestPrefersExplicitChoice covers the override
+// interaction: an explicit request wins so one account can be added for the
+// other realm while a global override is active.
+func TestAuthVariantFromRequestPrefersExplicitChoice(t *testing.T) {
+	resetState()
+
+	withVariantOverride(t, "cn")
+	if got := authVariantFromRequest("ai"); got != variantAi {
+		t.Fatalf("explicit ai while override=cn -> %q, want ai", got)
+	}
+	if got := authVariantFromRequest(""); got != variantCn {
+		t.Fatalf("no hint with override=cn -> %q, want cn", got)
+	}
+
+	withVariantOverride(t, "ai")
+	if got := authVariantFromRequest("cn"); got != variantCn {
+		t.Fatalf("explicit cn while override=ai -> %q, want cn", got)
+	}
+	if got := authVariantFromRequest(""); got != variantAi {
+		t.Fatalf("no hint with override=ai -> %q, want ai", got)
+	}
+
+	// Several spellings must be accepted.
+	withVariantOverride(t, "")
+	for _, spelling := range []string{"ai", "intl", "global", "international", "国际", "国际版"} {
+		if got := authVariantFromRequest(spelling); got != variantAi {
+			t.Errorf("hint %q -> %q, want ai", spelling, got)
+		}
+	}
+	for _, spelling := range []string{"cn", "china", "domestic", "国内", "国内版"} {
+		if got := authVariantFromRequest(spelling); got != variantCn {
+			t.Errorf("hint %q -> %q, want cn", spelling, got)
+		}
+	}
+}
+
+// TestAuthLoginUsesRealmHost proves the login request actually goes to the host
+// for the requested realm, not the hardcoded domestic one.
+func TestAuthLoginUsesRealmHost(t *testing.T) {
+	resetState()
+
+	// Point both realm hosts at two distinguishable local servers.
+	var intlHits, cnHits int
+	intl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		intlHits++
+		if r.Header.Get("X-Domain") != "www.workbuddy.ai" {
+			t.Errorf("intl X-Domain = %q", r.Header.Get("X-Domain"))
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"state":"s-intl","authUrl":"https://www.workbuddy.ai/login"}}`))
+	}))
+	defer intl.Close()
+	cnSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cnHits++
+		if r.Header.Get("X-Domain") != "copilot.tencent.com" {
+			t.Errorf("cn X-Domain = %q", r.Header.Get("X-Domain"))
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"state":"s-cn","authUrl":"https://copilot.tencent.com/login"}}`))
+	}))
+	defer cnSrv.Close()
+
+	prevGlobal, prevCopilot := workBuddyGlobalBase(), copilotHostValue()
+	setWorkBuddyGlobalBase(intl.URL)
+	setCopilotHost(cnSrv.URL)
+	t.Cleanup(func() {
+		setWorkBuddyGlobalBase(prevGlobal)
+		setCopilotHost(prevCopilot)
+	})
+
+	// International login.
+	_, state, err := startWorkBuddyLogin(variantAi)
+	if err != nil {
+		t.Fatalf("ai login: %v", err)
+	}
+	if state != "s-intl" {
+		t.Fatalf("ai state = %q, want s-intl (the international host)", state)
+	}
+	if intlHits != 1 || cnHits != 0 {
+		t.Fatalf("ai login hit intl=%d cn=%d, want 1/0", intlHits, cnHits)
+	}
+
+	// Domestic login.
+	_, state, err = startWorkBuddyLogin(variantCn)
+	if err != nil {
+		t.Fatalf("cn login: %v", err)
+	}
+	if state != "s-cn" {
+		t.Fatalf("cn state = %q, want s-cn (the domestic host)", state)
+	}
+	if intlHits != 1 || cnHits != 1 {
+		t.Fatalf("after cn login intl=%d cn=%d, want 1/1", intlHits, cnHits)
+	}
+}
+
+// TestPendingLoginRemembersVariant guards the polling side: the token endpoint
+// is realm-scoped, so the state has to carry the realm it was created with.
+func TestPendingLoginRemembersVariant(t *testing.T) {
+	store := newPendingLoginStore()
+	store.put(&pendingLogin{State: "s1", Variant: variantAi})
+	got, ok := store.get("s1")
+	if !ok {
+		t.Fatal("state not stored")
+	}
+	if got.Variant != variantAi {
+		t.Fatalf("stored variant = %q, want ai", got.Variant)
+	}
+}
+
+// TestAllPostLoginBasesFollowVariant is the guard for the "账号不通用" class of
+// bug on the call side.
+//
+// Every post-login surface (check-in, quota, refresh, growth) must resolve its
+// host through the variant layer rather than testing the domain directly.
+// Testing the domain alone ignored a forced override, so an account could be
+// authenticated against one realm and routed to the other.
+func TestAllPostLoginBasesFollowVariant(t *testing.T) {
+	resetState()
+	withVariantOverride(t, "")
+
+	cnDomain := "copilot.tencent.com"
+	aiDomain := "www.workbuddy.ai"
+
+	bases := map[string]func(string) string{
+		"checkin": workBuddyCheckinBase,
+		"quota":   workBuddyQuotaBase,
+		"token":   workBuddyBaseURL,
+	}
+
+	for name, fn := range bases {
+		t.Run(name, func(t *testing.T) {
+			// Domain-driven selection.
+			withVariantOverride(t, "")
+			if got := fn(cnDomain); strings.Contains(got, "workbuddy.ai") {
+				t.Errorf("cn domain resolved to %q", got)
+			}
+			if got := fn(aiDomain); !strings.Contains(got, "workbuddy.ai") {
+				t.Errorf("ai domain resolved to %q", got)
+			}
+
+			// A forced override must win over an empty domain.
+			withVariantOverride(t, "ai")
+			if got := fn(""); !strings.Contains(got, "workbuddy.ai") {
+				t.Errorf("override=ai with empty domain resolved to %q, want the international host", got)
+			}
+			withVariantOverride(t, "cn")
+			if got := fn(aiDomain); strings.Contains(got, "workbuddy.ai") {
+				t.Errorf("override=cn resolved to %q, want the domestic host", got)
+			}
+		})
+	}
+}
+
+// TestGrowthBaseFollowsOverride covers the growth host specifically.
+func TestGrowthBaseFollowsOverride(t *testing.T) {
+	resetState()
+
+	withVariantOverride(t, "ai")
+	creds := &workBuddyCredentials{AccessToken: "[REDACTED]", Domain: "copilot.tencent.com"}
+	if got := growthBase(creds); !strings.Contains(got, "workbuddy.ai") {
+		t.Fatalf("growthBase = %q, want the international host under override=ai", got)
+	}
+
+	withVariantOverride(t, "cn")
+	creds.Domain = "www.workbuddy.ai"
+	if got := growthBase(creds); !strings.Contains(got, "copilot.tencent.com") {
+		t.Fatalf("growthBase = %q, want the domestic host under override=cn", got)
 	}
 }

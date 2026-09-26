@@ -133,6 +133,39 @@ func managementRegistration() managementRegistrationResponse {
 				Path:        "/workbuddy/quota/config",
 				Description: "Update the automatic quota refresh interval.",
 			},
+			{
+				Method:      http.MethodGet,
+				Path:        "/workbuddy/variant",
+				Description: "Read the current variant override.",
+			},
+			// Growth-task endpoints.
+			//
+			// CPA dispatches management calls through an exact route table: a
+			// path that is not declared here is answered 404 by the host and
+			// never reaches the plugin's handler, whatever the handler
+			// implements. These four were missing, which is why 「完成成长任务」
+			// and 「查询任务明细」 both returned 404 while every other panel
+			// action worked.
+			{
+				Method:      http.MethodGet,
+				Path:        "/workbuddy/growth/tasks",
+				Description: "Growth task list and progress for one account (live upstream query).",
+			},
+			{
+				Method:      http.MethodGet,
+				Path:        "/workbuddy/growth/summary",
+				Description: "Growth welfare summary (energy, streak, travel state).",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/workbuddy/growth/run",
+				Description: "Run the full growth-task pass for one account or all of them.",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/workbuddy/growth/travel",
+				Description: "Run the cat-travel pass (depart or claim).",
+			},
 		},
 	}
 }

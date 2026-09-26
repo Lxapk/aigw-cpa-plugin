@@ -123,8 +123,16 @@ type workBuddyCredentials struct {
 //
 // Note: the cn branch returns copilotHostValue() rather than the constant so the
 // token-refresh endpoint follows the same test redirect as the login endpoints.
+// workBuddyBaseURL returns the API base for a stored credential.
+//
+// Refresh and any other post-login call must go to the same realm that minted
+// the token: a cn token is not accepted by the international host and vice
+// versa. The check therefore ORs two signals rather than trusting the domain
+// alone, because a credential whose domain field is empty would otherwise be
+// refreshed against the domestic host even when the operator forced 国际版.
 func workBuddyBaseURL(domain string) string {
-	if isWorkBuddyGlobalDomain(domain) {
+	creds := &workBuddyCredentials{Domain: domain}
+	if variantForCredentials(creds) == variantAi {
 		return workBuddyGlobalBase()
 	}
 	return copilotHostValue()
@@ -144,19 +152,61 @@ func workBuddyOriginURL(domain string) string {
 // a sane timeout is sufficient and keeps the plugin usable standalone.
 var workBuddyHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-// startWorkBuddyLogin ports V1/k.java:378 — ask Tencent for a device-code state
-// plus the user-facing authorization URL.
-func startWorkBuddyLogin() (authURL, state string, err error) {
-	endpoint := copilotHostValue() + "/v2/plugin/auth/state?platform=CLI"
+// authHostFor returns the login host for a variant.
+//
+// The reference implementation drives the whole device-code flow from a realm
+// config (wb_accounts.py:  start_login takes realm and builds
+// cfg["chat_upstream"] + AUTH_STATE_PATH). The host that issues the credential
+// is the host that will serve it afterwards, so choosing the wrong one produces
+// an account whose token is rejected by every later call — the "账号不通用"
+// symptom.
+//
+// cn   -> https://copilot.tencent.com
+// intl -> https://www.workbuddy.ai
+func authHostFor(variant wbVariant) string {
+	if variant == variantAi {
+		return workBuddyGlobalBase()
+	}
+	return copilotHostValue()
+}
+
+// authVariantFromRequest resolves the variant a login request asks for.
+//
+// CPA may pass the choice through the request's provider-ish fields; the plugin
+// also honours its own variant_override setting so an operator who forced
+// 「国际版」 gets an international login link without passing anything. An
+// explicit value always wins so a single account can be added for the other
+// realm while an override is active.
+func authVariantFromRequest(explicit string) wbVariant {
+	switch strings.ToLower(strings.TrimSpace(explicit)) {
+	case "ai", "intl", "global", "international", "国际", "国际版":
+		return variantAi
+	case "cn", "china", "domestic", "国内", "国内版":
+		return variantCn
+	}
+	switch strings.ToLower(strings.TrimSpace(state.settings.get().VariantOverride)) {
+	case "ai":
+		return variantAi
+	case "cn":
+		return variantCn
+	}
+	return variantCn
+}
+
+// startWorkBuddyLogin asks a host for a device-code state.
+//
+// The variant selects the host; see authHostFor. The reference implementation
+// also switches Origin / Referer / User-Agent per realm, which matters because
+// the login page renders differently and the callback is bound to the origin
+// that created the state.
+func startWorkBuddyLogin(variant wbVariant) (authURL, state string, err error) {
+	base := authHostFor(variant)
+	endpoint := base + "/v2/plugin/auth/state?platform=CLI"
 	req, errRequest := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader([]byte("{}")))
 	if errRequest != nil {
 		return "", "", errRequest
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", codebuddyUA)
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-
+	applyAuthIdentityHeaders(req.Header, variant)
 	resp, errDo := workBuddyHTTPClient.Do(req)
 	if errDo != nil {
 		return "", "", fmt.Errorf("请求授权链接失败: %w", errDo)
@@ -176,6 +226,37 @@ func startWorkBuddyLogin() (authURL, state string, err error) {
 		return "", "", errParse
 	}
 	return authURLValue, stateValue, nil
+}
+
+// applyAuthIdentityHeaders writes the realm-correct identity for auth calls.
+//
+// Mirrors REALM_CONFIGS' origin / billing_ua pairs so the request looks like it
+// came from the client that belongs to that realm.
+func applyAuthIdentityHeaders(h http.Header, variant wbVariant) {
+	h.Set("Content-Type", "application/json")
+	h.Set("Accept", "application/json, text/plain, */*")
+	h.Set("X-Requested-With", "XMLHttpRequest")
+
+	if variant == variantAi {
+		h.Set("Origin", "https://www.workbuddy.ai")
+		h.Set("Referer", "https://www.workbuddy.ai/")
+		h.Set("User-Agent", "WorkBuddy/5.5.2")
+		h.Set("X-Product", "WorkBuddy")
+		h.Set("X-IDE-Type", "WorkBuddy")
+		h.Set("X-IDE-Name", "WorkBuddy")
+		h.Set("X-IDE-Version", "5.5.2")
+		h.Set("X-Domain", "www.workbuddy.ai")
+		return
+	}
+	h.Set("Origin", "https://www.codebuddy.cn")
+	h.Set("Referer", "https://www.codebuddy.cn/")
+	h.Set("User-Agent", "WorkBuddy/5.5.6")
+	h.Set("X-Product", "WorkBuddy")
+	h.Set("X-IDE-Type", "WorkBuddy")
+	h.Set("X-IDE-Name", "WorkBuddy")
+	h.Set("X-IDE-Version", "5.5.6")
+	h.Set("X-Domain", "copilot.tencent.com")
+	_ = codebuddyUA
 }
 
 // parseWorkBuddyStateResponse extracts state + authUrl from the state response.
@@ -217,19 +298,19 @@ func parseWorkBuddyStateResponse(body []byte) (state, authURL string, err error)
 	return state, authURL, nil
 }
 
-// pollWorkBuddyLogin ports N1/B.java:55 — poll the token endpoint until the user
-// finishes signing in.
+// pollWorkBuddyLogin polls the token endpoint until the user finishes signing in.
 //
 // Returns (creds, nil) on success, (nil, nil) while still pending.
-func pollWorkBuddyLogin(state string) (*workBuddyCredentials, error) {
-	endpoint := copilotHostValue() + "/v2/plugin/auth/token?state=" + url.QueryEscape(state)
+//
+// The variant must be the one the state was created with: the token endpoint is
+// realm-scoped, so polling the other host reports the state as unknown forever.
+func pollWorkBuddyLogin(state string, variant wbVariant) (*workBuddyCredentials, error) {
+	endpoint := authHostFor(variant) + "/v2/plugin/auth/token?state=" + url.QueryEscape(state)
 	req, errRequest := http.NewRequest(http.MethodGet, endpoint, nil)
 	if errRequest != nil {
 		return nil, errRequest
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", codebuddyUA)
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	applyAuthIdentityHeaders(req.Header, variant)
 
 	resp, errDo := workBuddyHTTPClient.Do(req)
 	if errDo != nil {
@@ -665,6 +746,9 @@ type pendingLogin struct {
 	AuthURL   string
 	StartedAt time.Time
 	ExpiresAt time.Time
+	// Variant records which realm issued the state. The token endpoint is
+	// realm-scoped, so polling must go back to the same host.
+	Variant wbVariant
 }
 
 type pendingLoginStore struct {

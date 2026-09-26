@@ -122,13 +122,22 @@ func handleCheckinPost(req pluginapi.ManagementRequest) (managementResponse, boo
 }
 
 // normaliseManagementPath strips the plugin-resource prefix so the caller can
-// match on the tail (CPA may pass either form).
+// switch on the bare endpoint.
+//
+// CPA delivers both shapes: the full form ("/v0/management/workbuddy/accounts")
+// when the browser hits the management API directly, and a path already rooted
+// at the plugin ("/workbuddy/accounts") when the request came through the
+// resource handler. Both must resolve to "/accounts", or one entry point 404s
+// while the other works — which is exactly how the growth endpoints behaved.
 func normaliseManagementPath(path string) string {
 	p := strings.TrimSuffix(strings.TrimSpace(path), "/")
 	for _, prefix := range []string{
 		"/v0/resource/plugins/" + pluginName,
 		"/v0/management/" + pluginName,
 		"/v0/resource/plugins/workbuddy",
+		// Bare plugin-root forms.
+		"/v0/management/workbuddy",
+		"/workbuddy",
 	} {
 		if strings.HasPrefix(p, prefix) {
 			return strings.TrimPrefix(p, prefix)

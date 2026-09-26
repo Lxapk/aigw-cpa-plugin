@@ -193,7 +193,12 @@ func authLoginStart(request []byte) ([]byte, error) {
 			"本插件仅支持 "+workBuddyDisplayName+"（"+workBuddyProviderKey+"）登录", 400), nil
 	}
 
-	authURL, state, errStart := startWorkBuddyLogin()
+	// The realm decides which host issues the credential. A credential minted by
+	// one realm is rejected by the other, so the choice has to be made here
+	// rather than at request time.
+	variant := authVariantFromRequest(authVariantHint(req))
+
+	authURL, state, errStart := startWorkBuddyLogin(variant)
 	if errStart != nil {
 		return errorEnvelope("login_start_failed", errStart.Error(), 502), nil
 	}
@@ -205,6 +210,7 @@ func authLoginStart(request []byte) ([]byte, error) {
 		AuthURL:   authURL,
 		StartedAt: now,
 		ExpiresAt: expiresAt,
+		Variant:   variant,
 	})
 
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
@@ -213,10 +219,29 @@ func authLoginStart(request []byte) ([]byte, error) {
 		State:     state,
 		ExpiresAt: expiresAt,
 		Metadata: map[string]any{
-			"display_name": workBuddyDisplayName,
-			"hint":         "在浏览器打开上面的链接并使用 WorkBuddy/CodeBuddy 账号登录，登录完成后此处会自动完成。",
+			"display_name":  workBuddyDisplayName,
+			"variant":       string(variant),
+			"variant_label": variant.label(),
+			"hint": "在浏览器打开上面的链接并使用 " + variant.label() +
+				" 账号登录，登录完成后此处会自动完成。该账号后续的签到、额度与成长任务都会调用同一版本的接口。",
 		},
 	})
+}
+
+// authVariantHint reads the realm hint from a login-start request.
+//
+// AuthLoginStartRequest has no dedicated realm field, so the choice arrives
+// through Metadata. Several spellings are accepted so the caller does not have
+// to match one exact key.
+func authVariantHint(req pluginapi.AuthLoginStartRequest) string {
+	for _, key := range []string{"variant", "realm", "region", "domain"} {
+		if raw, ok := req.Metadata[key]; ok {
+			if text, isString := raw.(string); isString && strings.TrimSpace(text) != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 // authLoginPoll answers auth.login.poll: poll Tencent until the user finishes.
@@ -236,7 +261,13 @@ func authLoginPoll(request []byte) ([]byte, error) {
 		})
 	}
 
-	creds, errPoll := pollWorkBuddyLogin(state)
+	// Poll the realm that issued the state; the token endpoint is realm-scoped.
+	pendingVariant := variantCn
+	if pending, ok := workBuddyPendingLogins.get(state); ok && pending != nil && pending.Variant != "" {
+		pendingVariant = pending.Variant
+	}
+
+	creds, errPoll := pollWorkBuddyLogin(state, pendingVariant)
 	if errPoll != nil {
 		workBuddyPendingLogins.drop(state)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
