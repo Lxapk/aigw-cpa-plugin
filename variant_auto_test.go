@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -433,16 +435,12 @@ func TestMainPageVariantNoteExplainsScope(t *testing.T) {
 	page := renderMainPage()
 
 	// It must say the selector scopes which accounts participate.
-	if !strings.Contains(page, "作用于哪些账号") {
-		t.Fatal("the switch must state that it scopes which accounts participate")
+	if !strings.Contains(page, "决定<strong>调用</strong>时使用哪些账号") {
+		t.Fatal("the switch must state that it scopes which accounts are called")
 	}
 	// And that it does NOT re-label them.
-	if !strings.Contains(page, "不会") || !strings.Contains(page, "另一侧账号只是被跳过") {
-		t.Fatal("the switch must say accounts are not re-labelled and the other side is simply skipped")
-	}
-	// The international side has no check-in.
-	if !strings.Contains(page, "国际供应商没有签到接口") {
-		t.Fatal("the switch must mention that the international supplier has no check-in")
+	if !strings.Contains(page, "不影响已登录账号的归属") {
+		t.Fatal("the switch must say accounts are not re-labelled")
 	}
 	// The stale claim must be gone.
 	if strings.Contains(page, "则强制全部账号") {
@@ -450,45 +448,56 @@ func TestMainPageVariantNoteExplainsScope(t *testing.T) {
 	}
 }
 
-// TestMainPageHasOneSupplierSwitchAndDefersAuthToCPA pins the flow the user
-// asked for: the panel exposes a single supplier switch, and authorisation
-// happens in CPA's OAuth entry rather than through panel-minted links.
+// TestMainPageSplitsCallScopeFromAuthorisation is the guard for the requested
+// split: the supplier switch governs model calls only, and authorisation has its
+// own control.
 //
-// The panel used to offer two buttons that called /workbuddy/auth/start. Those
-// produced sessions CPA never saw, so an account authorised from the panel was
-// not equivalent to one authorised from CPA — a second, divergent auth path.
-func TestMainPageHasOneSupplierSwitchAndDefersAuthToCPA(t *testing.T) {
+// They used to be one setting, so changing which accounts a run touched also
+// changed which supplier the next login would authorise against — an operator
+// could not add an international account while keeping calls fanning out to
+// both.
+func TestMainPageSplitsCallScopeFromAuthorisation(t *testing.T) {
 	resetState()
 	page := renderMainPage()
 
-	// The switch is the only control.
+	// The call-scope switch.
 	if !strings.Contains(page, "供应商切换") {
-		t.Fatal("the panel is missing the 供应商切换 heading")
+		t.Fatal("missing the 供应商切换 heading")
+	}
+	if !strings.Contains(page, "仅影响模型调用") {
+		t.Fatal("the call switch must say it only affects model calls")
+	}
+	for _, needle := range []string{"全部供应商", "国内供应商", "国际供应商"} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("the call switch is missing the %s option", needle)
+		}
+	}
+	if !strings.Contains(page, "决定<strong>调用</strong>时使用哪些账号") {
+		t.Fatal("the call switch does not explain that it scopes which accounts are called")
+	}
+
+	// The authorisation switch, directly below it.
+	if !strings.Contains(page, "在 CPA 的 OAuth 登录中完成") {
+		t.Fatal("the panel does not point the operator at CPA's OAuth entry")
+	}
+	for _, needle := range []string{"国内授权", "国际授权", "跟随调用设置"} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("the authorisation switch is missing the %s option", needle)
+		}
+	}
+	if !strings.Contains(page, "只决定授权走哪一侧") {
+		t.Fatal("the authorisation switch does not say it only chooses the auth side")
+	}
+	if !strings.Contains(page, "window.setAuthSupplier = function") {
+		t.Fatal("the authorisation switch has no handler")
+	}
+
+	// The two hosts must be named so the operator knows what to expect.
+	if !strings.Contains(page, "copilot.tencent.com") || !strings.Contains(page, "www.workbuddy.ai") {
+		t.Fatal("the panel does not name the host each authorisation choice uses")
 	}
 	if strings.Contains(page, "版本切换") {
 		t.Fatal("the panel still says 版本切换")
-	}
-	// The three scopes must be offered.
-	for _, needle := range []string{"全部供应商", "国内供应商", "国际供应商"} {
-		if !strings.Contains(page, needle) {
-			t.Errorf("the switch is missing the %s option", needle)
-		}
-	}
-
-	// The panel must not mint auth links of its own any more.
-	for _, gone := range []string{"国内版授权", "国际版授权", "startAuth", "/auth/start"} {
-		if strings.Contains(page, gone) {
-			t.Errorf("the panel still contains the removed control %q", gone)
-		}
-	}
-
-	// And it must say where authorisation actually happens.
-	if !strings.Contains(page, "授权在 CPA 的 OAuth 登录中完成") {
-		t.Fatal("the panel does not point the operator at CPA's OAuth entry")
-	}
-	// Each scope must name its host, so the operator knows what to expect.
-	if !strings.Contains(page, "copilot.tencent.com") || !strings.Contains(page, "www.workbuddy.ai") {
-		t.Fatal("the panel does not name the host each scope will use")
 	}
 }
 
@@ -1571,5 +1580,105 @@ func TestAutoDisabledAccountReportsUsableFalse(t *testing.T) {
 	}
 	if after.DisabledReason == "" {
 		t.Fatal("the panel has no reason to show")
+	}
+}
+
+// ---- authorisation supplier split ----------------------------------------
+
+// TestAuthSupplierIsIndependentOfCallScope is the guard for the split.
+//
+// Before it, authVariantResolve read the call-scope setting, so narrowing calls
+// to one supplier silently changed which supplier the next login used. The two
+// decisions must be independent.
+func TestAuthSupplierIsIndependentOfCallScope(t *testing.T) {
+	resetState()
+
+	// Call scope narrowed to domestic, authorisation explicitly international.
+	state.settings.setVariantOverride("cn")
+	state.settings.setAuthSupplier("ai")
+
+	creds := &workBuddyCredentials{Domain: "www.workbuddy.ai"}
+	// Calls only act on domestic accounts...
+	if variantAllowed(creds) {
+		t.Fatal("the call scope admitted an international account under cn")
+	}
+	// ...but authorisation still targets the international host.
+	variant, explicit := authVariantResolve(pluginapi.AuthLoginStartRequest{})
+	if variant != variantAi || explicit {
+		t.Fatalf("login resolved to %q (explicit=%v), want ai from the auth switch", variant, explicit)
+	}
+	if host := authHostFor(variant); !strings.Contains(host, "workbuddy.ai") {
+		t.Fatalf("auth host = %q, want the international host", host)
+	}
+}
+
+// TestAuthSupplierFallsBackToCallScope covers the unset case: an operator who
+// only ever touches the call switch should still get a matching login link.
+func TestAuthSupplierFallsBackToCallScope(t *testing.T) {
+	resetState()
+
+	state.settings.setVariantOverride("ai")
+	state.settings.setAuthSupplier("")
+	if got := state.settings.get().authSupplierOrDefault(); got != variantAi {
+		t.Fatalf("unset auth supplier resolved to %q, want ai from the call scope", got)
+	}
+
+	state.settings.setVariantOverride("")
+	if got := state.settings.get().authSupplierOrDefault(); got != variantCn {
+		t.Fatalf("both unset resolved to %q, want the cn default", got)
+	}
+
+	// An explicit authorisation choice always wins.
+	state.settings.setAuthSupplier("cn")
+	state.settings.setVariantOverride("ai")
+	if got := state.settings.get().authSupplierOrDefault(); got != variantCn {
+		t.Fatalf("explicit auth choice lost to the call scope: got %q", got)
+	}
+}
+
+// TestPanelChoicesPersistTogether guards the on-disk interaction: both panel
+// selections live in one file, so writing one must not drop the other.
+//
+// The store is built with a real path here because the point is what reaches
+// disk; the shared test state uses an empty path and never writes.
+func TestPanelChoicesPersistTogether(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel-choices.json")
+	store := newSettingsStoreWithPersist(path)
+	original := state.settings
+	state.settings = store
+	defer func() { state.settings = original }()
+
+	store.setVariantOverride("cn")
+	store.setAuthSupplier("ai")
+
+	disk := store.restorePanelChoices()
+	if disk.VariantOverride != "cn" {
+		t.Fatalf("persisted call scope = %q, want cn", disk.VariantOverride)
+	}
+	if disk.AuthSupplier != "ai" {
+		t.Fatalf("persisted auth supplier = %q, want ai; saving the call scope dropped it", disk.AuthSupplier)
+	}
+
+	// The reverse order must be equally safe.
+	store.setAuthSupplier("cn")
+	disk = store.restorePanelChoices()
+	if disk.VariantOverride != "cn" || disk.AuthSupplier != "cn" {
+		t.Fatalf("after saving authorisation second: %+v", disk)
+	}
+
+	// The file is valid JSON with both keys.
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read state file: %v", errRead)
+	}
+	var doc map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &doc); errUnmarshal != nil {
+		t.Fatalf("state file is not valid JSON: %v", errUnmarshal)
+	}
+	if _, ok := doc["variant_override"]; !ok {
+		t.Error("state file lost variant_override")
+	}
+	if _, ok := doc["auth_supplier"]; !ok {
+		t.Error("state file lost auth_supplier")
 	}
 }

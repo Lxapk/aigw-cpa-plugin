@@ -175,20 +175,21 @@ func authHostFor(variant wbVariant) string {
 // authVariantResolve picks the realm for a login request.
 //
 // Returns the chosen variant and whether the caller asked for it explicitly.
-// An explicit choice wins so a single account can be added for the other realm
-// while the global selector points elsewhere; otherwise the selector decides,
-// and 自动 falls back to the domestic channel (the login entry that exists for
-// both realms cannot be guessed, and cn is the one the majority of users need).
+//
+// The setting it consults is the authorisation switch (AuthSupplier), not the
+// call-scope switch. Keeping them separate lets an operator add an account for
+// one supplier while calls still fan out to both; before the split, changing
+// the call scope silently changed which supplier the next login would use.
+//
+// An explicit request still wins, so a one-off login for the other realm does
+// not require touching any setting.
 func authVariantResolve(req pluginapi.AuthLoginStartRequest) (wbVariant, bool) {
 	if hint := authVariantHint(req); hint != "" {
 		if variant, ok := parseVariant(hint); ok {
 			return variant, true
 		}
 	}
-	if variant, ok := parseVariant(state.settings.get().VariantOverride); ok {
-		return variant, false
-	}
-	return variantCn, false
+	return state.settings.get().authSupplierOrDefault(), false
 }
 
 // parseVariant maps a user-facing spelling to a variant.

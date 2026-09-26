@@ -397,12 +397,13 @@ func renderMainPage() string {
 	b.WriteString(`</div>`)
 
 	curVariant := state.settings.get().VariantOverride
-	b.WriteString(`<div class="card"><h2>供应商切换 <span class="hint">国内供应商与国际供应商</span></h2>`)
+	curAuth := state.settings.get().AuthSupplier
+	b.WriteString(`<div class="card"><h2>供应商切换 <span class="hint">仅影响模型调用</span></h2>`)
 	b.WriteString(`<div class="seg" id="variantSeg">`)
 	for _, opt := range []struct{ v, label, title string }{
-		{"auto", "全部供应商", "两组账号都参与调用；授权走国内"},
-		{"cn", "国内供应商", "仅国内账号参与；授权走 copilot.tencent.com"},
-		{"ai", "国际供应商", "仅国际账号参与；授权走 www.workbuddy.ai"},
+		{"auto", "全部供应商", "两组账号都参与调用"},
+		{"cn", "国内供应商", "仅国内账号参与调用"},
+		{"ai", "国际供应商", "仅国际账号参与调用"},
 	} {
 		cls := ""
 		if (opt.v == "auto" && curVariant == "") || opt.v == curVariant {
@@ -413,31 +414,38 @@ func renderMainPage() string {
 			` onclick="setVariant('` + opt.v + `')">` + opt.label + `</button>`)
 	}
 	b.WriteString(`</div>`)
-	b.WriteString(`<div class="note">用途一：决定本插件这一轮操作<strong>作用于哪些账号</strong>——<strong>全部供应商</strong>（默认）让国内与国际账号同轮参与；<strong>国内供应商</strong>只处理国内账号，<strong>国际供应商</strong>只处理国际账号。</div>`)
-	b.WriteString(`<div class="note">用途二：决定 <strong>CPA 的 OAuth 授权走哪一侧</strong>——` +
-		`选<strong>国内供应商</strong>时，点 CPA 的授权入口会打开 <code>copilot.tencent.com</code>，签发国内凭据；` +
-		`选<strong>国际供应商</strong>时打开 <code>www.workbuddy.ai</code>，签发国际凭据。</div>`)
-	b.WriteString(`<div class="note"><strong>要两个供应商的账号</strong>：先切到国内供应商 → 在 CPA 完成授权；` +
-		`再切到国际供应商 → 在 CPA 完成授权；最后切回「全部供应商」，两组账号就会一起参与调用。</div>`)
-	b.WriteString(`<div class="note">选「全部供应商」时授权默认走<strong>国内</strong>（多数账号是国内）；` +
-		`如需国际凭据，请先切到「国际供应商」再授权。</div>`)
-	b.WriteString(`<div class="note">该开关<strong>不会</strong>把账号改判成另一个供应商：每个账号始终调用签发它凭据的那一侧接口，否则必然鉴权失败。因此选择某一侧时，另一侧账号只是被跳过，不需要重新登录。</div>`)
-	b.WriteString(`<div class="note">国际供应商没有签到接口，也没有成长任务中心；这些功能只在选用国内账号时执行。</div>`)
+	b.WriteString(`<div class="note">决定<strong>调用</strong>时使用哪些账号：<strong>全部供应商</strong>（默认）按每个账号自身归属自动选择——国内账号走国内接口、国际账号走国际接口，两组并存；` +
+		`<strong>国内供应商</strong>只调用国内账号，<strong>国际供应商</strong>只调用国际账号。</div>`)
+	b.WriteString(`<div class="note">不影响已登录账号的归属：每个账号始终调用签发它凭据的那一侧，另一侧只是被跳过，无需重新登录。</div>`)
 	b.WriteString(`<div class="muted small" id="variantMsg"></div>`)
 
-	// One switch decides the supplier; authorisation itself happens in CPA.
+	// Authorisation is its own switch.
 	//
-	// The panel used to offer two buttons that minted links of its own. That
-	// duplicated CPA's OAuth flow and produced sessions CPA never saw, so an
-	// account authorised here was not the same as one authorised there. The
-	// switch below is all that is needed: CPA's single OAuth entry reads it and
-	// sends the user to the matching host.
-	b.WriteString(`<div class="note" style="margin-top:.8rem">授权在 CPA 的 OAuth 登录中完成：` +
-		`上面的选择决定该入口走<strong>国内</strong>还是<strong>国际</strong>供应商。` +
-		`选「国内供应商」时点 CPA 的授权入口会打开 <code>copilot.tencent.com</code>，` +
-		`选「国际供应商」时打开 <code>www.workbuddy.ai</code>；选「全部供应商」时默认走国内。` +
-		`需要两个供应商的账号时，切换后各授权一次即可。</div>`)
-	b.WriteString(`<div id="authLinkBox"></div>`)
+	// It used to share the call-scope control, so changing which accounts a run
+	// touched also changed which supplier the next login would authorise
+	// against. They are independent decisions.
+	b.WriteString(`<h3 style="margin:1rem 0 .35rem;font-size:.95rem">授权 <span class="hint">在 CPA 的 OAuth 登录中完成</span></h3>`)
+	b.WriteString(`<div class="seg" id="authSeg">`)
+	for _, opt := range []struct{ v, label, title string }{
+		{"", "跟随调用设置", "不单独指定；按上面的供应商切换决定（默认国内）"},
+		{"cn", "国内授权", "CPA 的授权入口打开 copilot.tencent.com"},
+		{"ai", "国际授权", "CPA 的授权入口打开 www.workbuddy.ai"},
+	} {
+		cls := ""
+		if opt.v == curAuth {
+			cls = ` class="active"`
+		}
+		b.WriteString(`<button type="button" data-auth="` + opt.v + `"` + cls +
+			` title="` + html.EscapeString(opt.title) + `"` +
+			` onclick="setAuthSupplier('` + opt.v + `')">` + opt.label + `</button>`)
+	}
+	b.WriteString(`</div>`)
+	b.WriteString(`<div class="note">本开关<strong>只决定授权走哪一侧</strong>，与上面的调用设置互相独立。` +
+		`选<strong>国内授权</strong>时，点 CPA 的授权入口会用 <code>copilot.tencent.com</code> 签发国内凭据；` +
+		`选<strong>国际授权</strong>时用 <code>www.workbuddy.ai</code> 签发国际凭据。</div>`)
+	b.WriteString(`<div class="note"><strong>要两个供应商的账号</strong>：这里选国内授权 → 到 CPA 完成授权；` +
+		`再选国际授权 → 到 CPA 完成授权；之后把上面的调用设置保持为「全部供应商」，两组账号会一起参与调用。</div>`)
+	b.WriteString(`<div class="muted small" id="authMsg"></div>`)
 	b.WriteString(`</div>`)
 
 	b.WriteString(`</div>` + mainPageScript() + `</body></html>`)
@@ -610,31 +618,40 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 
 // ---- variant endpoint --------------------------------------------------
 
+// handleVariantRequest serves the two panel switches.
+//
+// GET  -> current values of both (call scope and authorisation supplier)
+// POST -> update one or both; the body may carry "variant" and "auth_supplier"
+//
+// They are two settings on one endpoint because the panel renders them together
+// and a single round trip keeps the two values consistent on screen.
 func handleVariantRequest(req pluginapi.ManagementRequest) (managementResponse, bool) {
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
 
-	// GET reports the current override; the panel reads it on load.
+	// GET reports the current selections; the panel reads them on load.
 	if method == http.MethodGet {
-		current := state.settings.get().VariantOverride
-		label := "全部供应商"
-		switch current {
-		case "cn":
-			label = "仅国内供应商"
-		case "ai":
-			label = "仅国际供应商"
-		}
+		current := state.settings.get()
 		return managementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    jsonResponseHeaders(),
-			Body:       mustJSON(map[string]any{"ok": true, "variant": current, "label": label}),
+			Body: mustJSON(map[string]any{
+				"ok":             true,
+				"variant":        current.VariantOverride,
+				"label":          callScopeLabel(current.VariantOverride),
+				"auth_supplier":  current.AuthSupplier,
+				"auth_label":     authSupplierLabel(current),
+				"auth_effective": string(current.authSupplierOrDefault()),
+			}),
 		}, true
 	}
 
 	if method != http.MethodPost {
 		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
 	}
+
 	var body struct {
-		Variant string `json:"variant"`
+		Variant      *string `json:"variant"`
+		AuthSupplier *string `json:"auth_supplier"`
 	}
 	if len(req.Body) > 0 {
 		if errUnmarshal := json.Unmarshal(req.Body, &body); errUnmarshal != nil {
@@ -645,16 +662,66 @@ func handleVariantRequest(req pluginapi.ManagementRequest) (managementResponse, 
 			}, true
 		}
 	}
-	v := body.Variant
-	if v != "" && v != "cn" && v != "ai" {
-		v = ""
+
+	// A field the caller omitted keeps its current value: the panel sends only
+	// the switch the operator touched.
+	if body.Variant != nil {
+		v := strings.TrimSpace(*body.Variant)
+		if !validVariantChoice(v) {
+			v = ""
+		}
+		state.settings.setVariantOverride(v)
 	}
-	state.settings.setVariantOverride(v)
+	if body.AuthSupplier != nil {
+		v := strings.TrimSpace(*body.AuthSupplier)
+		if !validVariantChoice(v) {
+			v = ""
+		}
+		state.settings.setAuthSupplier(v)
+	}
+
+	current := state.settings.get()
 	return managementResponse{
 		StatusCode: http.StatusOK,
 		Headers:    jsonResponseHeaders(),
-		Body:       mustJSON(map[string]any{"ok": true, "variant": v}),
+		Body: mustJSON(map[string]any{
+			"ok":             true,
+			"variant":        current.VariantOverride,
+			"label":          callScopeLabel(current.VariantOverride),
+			"auth_supplier":  current.AuthSupplier,
+			"auth_label":     authSupplierLabel(current),
+			"auth_effective": string(current.authSupplierOrDefault()),
+		}),
 	}, true
+}
+
+// callScopeLabel renders the call-scope switch for the panel.
+func callScopeLabel(v string) string {
+	switch v {
+	case "cn":
+		return "仅国内供应商"
+	case "ai":
+		return "仅国际供应商"
+	}
+	return "全部供应商"
+}
+
+// authSupplierLabel renders the authorisation switch, noting when it inherits
+// the call scope so the operator can tell a real value from a fallback.
+func authSupplierLabel(g gatewaySettings) string {
+	switch g.AuthSupplier {
+	case "cn":
+		return "国内授权"
+	case "ai":
+		return "国际授权"
+	}
+	switch g.VariantOverride {
+	case "cn":
+		return "跟随调用设置（国内授权）"
+	case "ai":
+		return "跟随调用设置（国际授权）"
+	}
+	return "跟随调用设置（默认国内授权）"
 }
 
 // ---- account toggle endpoint -------------------------------------------

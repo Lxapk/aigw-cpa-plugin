@@ -235,27 +235,53 @@ func mainPageScript() string {
   };
 
   // ---- variant override -----------------------------------------------
-  window.setVariant = function (v) {
-    var msg = document.getElementById('variantMsg');
+  // savePanelChoice posts one panel selection.
+  //
+  // Only the touched field is sent: the endpoint keeps the other one untouched,
+  // so switching authorisation cannot silently reset the call scope.
+  function savePanelChoice(field, value, segId, dataAttr, msgId, onOk) {
+    var msg = document.getElementById(msgId);
     if (msg) { msg.textContent = '保存中…'; msg.className = 'small muted'; }
-    call(BASE + '/variant', {
+    var body = {};
+    body[field] = value;
+    return call(BASE + '/variant', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ variant: v })
-    }).then(function () {
+      body: JSON.stringify(body)
+    }).then(function (payload) {
       // Update the segmented control in place. Reloading immediately used to
-      // wipe this confirmation after 700ms, which is why a successful switch
+      // wipe the confirmation after 700ms, which is why a successful switch
       // looked like nothing had happened.
-      var seg = document.getElementById('variantSeg');
+      var seg = document.getElementById(segId);
       if (seg) {
         var buttons = seg.getElementsByTagName('button');
         for (var i = 0; i < buttons.length; i++) {
-          buttons[i].className = buttons[i].getAttribute('data-variant') === (v || 'auto') ? 'active' : '';
+          buttons[i].className = buttons[i].getAttribute(dataAttr) === value ? 'active' : '';
         }
       }
-      if (msg) { msg.textContent = '供应商已切换为 ' + (v === 'cn' ? '仅国内供应商' : v === 'ai' ? '仅国际供应商' : '全部供应商') + '；账号归属不变，仅决定哪些账号参与调用'; msg.className = 'small ok'; }
-      setTimeout(function () { location.reload(); }, 2500);
+      if (msg) { msg.textContent = onOk(payload); msg.className = 'small ok'; }
+      return payload;
+    });
+  }
+
+  window.setVariant = function (v) {
+    savePanelChoice('variant', v, 'variantSeg', 'data-variant', 'variantMsg', function () {
+      return '调用范围已切换为 ' + (v === 'cn' ? '仅国内供应商' : v === 'ai' ? '仅国际供应商' : '全部供应商') +
+        '；账号归属不变，仅决定哪些账号参与调用';
     }).catch(function (e) {
+      var msg = document.getElementById('variantMsg');
+      if (msg) { msg.textContent = '设置失败：' + e.message; msg.className = 'small bad'; }
+    });
+  };
+
+  // setAuthSupplier switches which supplier CPA's OAuth entry authorises.
+  window.setAuthSupplier = function (v) {
+    savePanelChoice('auth_supplier', v, 'authSeg', 'data-auth', 'authMsg', function (payload) {
+      var label = v === 'cn' ? '国内授权' : v === 'ai' ? '国际授权' : '跟随调用设置';
+      var host = payload.auth_effective === 'ai' ? 'www.workbuddy.ai' : 'copilot.tencent.com';
+      return '授权渠道已设为 ' + label + '；下次在 CPA 的 OAuth 入口授权将使用 ' + host;
+    }).catch(function (e) {
+      var msg = document.getElementById('authMsg');
       if (msg) { msg.textContent = '设置失败：' + e.message; msg.className = 'small bad'; }
     });
   };

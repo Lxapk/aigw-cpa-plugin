@@ -93,10 +93,21 @@ type gatewaySettings struct {
 	Quota quotaSettings `json:"quota" yaml:"quota"`
 	// Routing holds the account-selection strategy (nested under "routing").
 	Routing routingSettings `json:"routing" yaml:"routing"`
-	// VariantOverride scopes which accounts a pass acts on.
+	// VariantOverride scopes which accounts an operation acts on.
 	// "" = auto (every account), "cn" = domestic only, "ai" = international only.
 	// It never changes an account's own realm; see variantAllowed.
+	//
+	// This is the supplier switch for *calls*. Authorisation has its own setting
+	// (AuthSupplier) so the two can be chosen independently.
 	VariantOverride string `json:"variant_override" yaml:"variant_override"`
+	// AuthSupplier picks which supplier CPA's OAuth entry authorises against.
+	// "" = follow VariantOverride (and fall back to domestic), "cn" = domestic,
+	// "ai" = international.
+	//
+	// Separate from VariantOverride on purpose: an operator may want to keep
+	// routing calls to both suppliers while adding an account for just one, and
+	// coupling the two made that impossible without flipping the call scope.
+	AuthSupplier string `json:"auth_supplier" yaml:"auth_supplier"`
 }
 
 // defaultGatewaySettings returns the exact defaults of V1.s's synthetic
@@ -173,6 +184,26 @@ func (g *gatewaySettings) applyDefaults() {
 	if g.VariantOverride != "" && g.VariantOverride != "cn" && g.VariantOverride != "ai" {
 		g.VariantOverride = ""
 	}
+	// And the authorisation supplier.
+	if g.AuthSupplier != "" && g.AuthSupplier != "cn" && g.AuthSupplier != "ai" {
+		g.AuthSupplier = ""
+	}
+}
+
+// authSupplierOrDefault resolves which supplier authorisation should use.
+//
+// Empty means "not chosen explicitly": it follows the call-scope setting so an
+// operator who picked 国际供应商 there gets an international login link without
+// touching a second control; if that is also unset (全部供应商) it falls back to
+// domestic, which is the majority case.
+func (g gatewaySettings) authSupplierOrDefault() wbVariant {
+	if variant, ok := parseVariant(g.AuthSupplier); ok {
+		return variant
+	}
+	if variant, ok := parseVariant(g.VariantOverride); ok {
+		return variant
+	}
+	return variantCn
 }
 
 // applyDefaults fills the check-in block with sensible values when it was not
@@ -253,8 +284,8 @@ func (s *settingsStore) setQuota(cfg quotaSettings) {
 	s.val.Quota = cfg
 }
 
-// setVariantOverride persists the variant force-setting. The override is
-// stored both in memory and in the per-user state file so that a later
+// setVariantOverride persists the call-scope setting. The override is stored
+// both in memory and in the per-user state file so that a later
 // plugin.reconfigure (which carries no variant_override in its YAML) cannot
 // silently reset the panel choice back to "auto".
 func (s *settingsStore) setVariantOverride(v string) {
@@ -263,42 +294,83 @@ func (s *settingsStore) setVariantOverride(v string) {
 		v = ""
 	}
 	s.val.VariantOverride = v
+	authSupplier := s.val.AuthSupplier
 	s.mu.Unlock()
-	s.saveVariantOverrideLocked(v)
+	s.savePanelChoicesLocked(v, authSupplier)
 }
 
-// saveVariantOverrideLocked mirrors the current override to disk (best effort;
+// setAuthSupplier persists which supplier authorisation should use.
+//
+// Kept in the same file as the call scope: two independent writers to one path
+// would overwrite each other's key, and a panel click on one control would
+// silently drop the other's value.
+func (s *settingsStore) setAuthSupplier(v string) {
+	s.mu.Lock()
+	if v != "" && v != "cn" && v != "ai" {
+		v = ""
+	}
+	s.val.AuthSupplier = v
+	variantOverride := s.val.VariantOverride
+	s.mu.Unlock()
+	s.savePanelChoicesLocked(variantOverride, v)
+}
+
+// panelChoices is the on-disk shape for the two panel selections.
+type panelChoices struct {
+	VariantOverride string `json:"variant_override"`
+	AuthSupplier    string `json:"auth_supplier"`
+}
+
+// savePanelChoicesLocked mirrors both panel selections to disk (best effort;
 // a read-only data dir must not break the panel).
-func (s *settingsStore) saveVariantOverrideLocked(v string) {
+func (s *settingsStore) savePanelChoicesLocked(variantOverride, authSupplier string) {
 	if s.persistPath == "" {
 		return
 	}
-	raw, errMarshal := json.Marshal(struct {
-		VariantOverride string `json:"variant_override"`
-	}{VariantOverride: v})
+	raw, errMarshal := json.Marshal(panelChoices{
+		VariantOverride: variantOverride,
+		AuthSupplier:    authSupplier,
+	})
 	if errMarshal != nil {
 		return
 	}
 	_ = atomicWriteFile(s.persistPath, raw)
 }
 
-// restoreVariantOverride reads a previously persisted override (from a panel
-// action in an earlier plugin instance or before the last reconfigure).
-func (s *settingsStore) restoreVariantOverride() string {
+// restorePanelChoices reads previously persisted panel selections.
+func (s *settingsStore) restorePanelChoices() panelChoices {
 	if s.persistPath == "" {
-		return ""
+		return panelChoices{}
 	}
 	raw, errRead := os.ReadFile(s.persistPath)
 	if errRead != nil {
-		return ""
+		return panelChoices{}
 	}
-	var disk struct {
-		VariantOverride string `json:"variant_override"`
-	}
+	var disk panelChoices
 	if errUnmarshal := json.Unmarshal(raw, &disk); errUnmarshal != nil {
-		return ""
+		return panelChoices{}
 	}
-	if disk.VariantOverride != "" && disk.VariantOverride != "cn" && disk.VariantOverride != "ai" {
+	return disk
+}
+
+// validVariantChoice reports whether a stored value is usable.
+func validVariantChoice(v string) bool {
+	return v == "" || v == "cn" || v == "ai"
+}
+
+// saveVariantOverrideLocked is kept for callers that only touch the call scope.
+func (s *settingsStore) saveVariantOverrideLocked(v string) {
+	s.mu.Lock()
+	authSupplier := s.val.AuthSupplier
+	s.mu.Unlock()
+	s.savePanelChoicesLocked(v, authSupplier)
+}
+
+// restoreVariantOverride reads a previously persisted override (from a panel
+// action in an earlier plugin instance or before the last reconfigure).
+func (s *settingsStore) restoreVariantOverride() string {
+	disk := s.restorePanelChoices()
+	if !validVariantChoice(disk.VariantOverride) {
 		return ""
 	}
 	return disk.VariantOverride
@@ -349,11 +421,18 @@ func (s *settingsStore) decodeLifecycleConfig(raw []byte) error {
 	// not explicitly set variant_override, restore the persisted panel choice
 	// so a reconfigure does not flip a manually forced variant back to "auto".
 	if !yamlHasKey(raw, "variant_override") {
-		if restored := s.restoreVariantOverride(); restored != "" {
-			s.mu.Lock()
-			s.val.VariantOverride = restored
-			s.mu.Unlock()
+		// Restore both panel selections from the state file. They are read
+		// together because a reconfigure carries neither, and restoring only
+		// one would silently reset the other to its default.
+		disk := s.restorePanelChoices()
+		s.mu.Lock()
+		if validVariantChoice(disk.VariantOverride) {
+			s.val.VariantOverride = disk.VariantOverride
 		}
+		if validVariantChoice(disk.AuthSupplier) {
+			s.val.AuthSupplier = disk.AuthSupplier
+		}
+		s.mu.Unlock()
 	}
 	s.registrations.Add(1)
 	return nil
