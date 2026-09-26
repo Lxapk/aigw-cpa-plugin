@@ -420,16 +420,58 @@ func TestMainPageDeclaresPollingContract(t *testing.T) {
 	}
 }
 
-// TestMainPageVariantNoteExplainsScope keeps the switch's side effects documented
-// in the UI: the override re-routes endpoints without rewriting credentials.
+// TestMainPageVariantNoteExplainsScope keeps the switch's real semantics
+// documented in the UI.
+//
+// The note previously said the switch "强制全部账号" (re-labels every account),
+// which stopped being true once the override was reduced to a scope filter.
+// A wrong explanation here is worse than none: it sent operators looking for a
+// re-authorisation that is not needed.
 func TestMainPageVariantNoteExplainsScope(t *testing.T) {
 	resetState()
 	page := renderMainPage()
-	if !strings.Contains(page, "不会改写已登录账号的凭据") {
-		t.Fatal("variant switch must warn that credentials are not rewritten")
+
+	// It must say the selector scopes which accounts participate.
+	if !strings.Contains(page, "作用于哪些账号") {
+		t.Fatal("the switch must state that it scopes which accounts participate")
 	}
-	if !strings.Contains(page, "国际版没有签到接口") {
-		t.Fatal("variant switch must mention that the international build has no check-in")
+	// And that it does NOT re-label them.
+	if !strings.Contains(page, "不会") || !strings.Contains(page, "另一侧账号只是被跳过") {
+		t.Fatal("the switch must say accounts are not re-labelled and the other side is simply skipped")
+	}
+	// The international side has no check-in.
+	if !strings.Contains(page, "国际供应商没有签到接口") {
+		t.Fatal("the switch must mention that the international supplier has no check-in")
+	}
+	// The stale claim must be gone.
+	if strings.Contains(page, "则强制全部账号") {
+		t.Fatal("the removed 强制全部账号 claim is still present")
+	}
+}
+
+// TestMainPageOffersTwoAuthEntries covers the requested panel buttons: one for
+// each supplier, so an account can be added for the side you are not scoped to.
+func TestMainPageOffersTwoAuthEntries(t *testing.T) {
+	resetState()
+	page := renderMainPage()
+
+	for _, needle := range []string{"国内版授权", "国际版授权"} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("main page is missing the %s button", needle)
+		}
+	}
+	if !strings.Contains(page, "window.startAuth = function") {
+		t.Fatal("startAuth is referenced but never defined")
+	}
+	if !strings.Contains(page, "/auth/start") {
+		t.Fatal("the buttons do not call the auth-start endpoint")
+	}
+	// The heading must not promise a version, now that the concept is a supplier.
+	if strings.Contains(page, "版本切换") {
+		t.Fatal(`the panel still says 版本切换; it should say 供应商切换`)
+	}
+	if !strings.Contains(page, "供应商切换") {
+		t.Fatal("the panel is missing the 供应商切换 heading")
 	}
 }
 

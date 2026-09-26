@@ -41,8 +41,6 @@ const (
 	// strategyByExpiry spends the soonest-expiring credits first, which is the
 	// reference implementation's rotation policy.
 	strategyByExpiry schedulerStrategy = "by_expiry"
-	// strategyWeighted uses three-factor weighted random selection.
-	strategyWeighted schedulerStrategy = "weighted"
 	// strategyByCredits prefers the account with the most remaining quota.
 	strategyByCredits schedulerStrategy = "by_credits"
 	// strategyRoundRobin rotates through the candidates deterministically.
@@ -52,8 +50,14 @@ const (
 )
 
 // allSchedulerStrategies lists the strategies in display order.
+//
+// A "weighted" strategy (three-factor weighted random) used to be offered here.
+// It was removed: it shared this exact call path with by_credits — same
+// SchedulerPick RPC, same candidate set, same response shape, only a different
+// choice function — and its enable switch was never consulted anywhere, so the
+// setting was inert. Keeping two strategies that differ only in arithmetic made
+// the panel harder to reason about for no behavioural gain.
 var allSchedulerStrategies = []schedulerStrategy{
-	strategyWeighted,
 	strategyByExpiry,
 	strategyByCredits,
 	strategyRoundRobin,
@@ -62,6 +66,10 @@ var allSchedulerStrategies = []schedulerStrategy{
 
 // normalizeStrategy coerces user input, defaulting to by_credits (the app's
 // behaviour) when unrecognised.
+//
+// "weighted" and its Chinese spellings are deliberately absent: a configuration
+// saved under the old version falls through to the default rather than matching
+// a strategy that no longer exists.
 func normalizeStrategy(s string) schedulerStrategy {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case string(strategyRoundRobin), "round-robin", "roundrobin", "rr", "轮巡":
@@ -70,8 +78,6 @@ func normalizeStrategy(s string) schedulerStrategy {
 		return strategyRandom
 	case string(strategyByCredits), "credits", "quota", "按额度", "额度":
 		return strategyByCredits
-	case "weighted", "三因子", "加权":
-		return strategyWeighted
 	case "by_expiry", "expiry", "expire", "soonest", "按到期", "到期", "紧迫":
 		return strategyByExpiry
 	}
@@ -86,8 +92,6 @@ func (s schedulerStrategy) label() string {
 		return "随机"
 	case strategyByExpiry:
 		return "按到期"
-	case strategyWeighted:
-		return "三因子加权"
 	default:
 		return "按额度"
 	}
@@ -319,15 +323,12 @@ func schedulerPick(request []byte) ([]byte, error) {
 	}
 
 	strategy := state.settings.get().Routing.Strategy
-	weightedCfg := state.settings.get().Weighted
 	var chosen string
 	var delegate string
 
 	switch strategy {
 	case strategyByExpiry:
 		chosen, _ = pickByExpiryScheduler(req, candidates)
-	case strategyWeighted:
-		chosen = pickWeightedFromCandidates(candidates, weightedCfg)
 	case strategyRoundRobin:
 		delegate = pluginapi.SchedulerBuiltinRoundRobin
 	case strategyRandom:
@@ -348,43 +349,6 @@ func schedulerPick(request []byte) ([]byte, error) {
 
 	state.scheduler.recordPick(chosen)
 	return okEnvelope(pluginapi.SchedulerPickResponse{Handled: true, AuthID: chosen})
-}
-
-// pickWeightedFromCandidates converts scheduler candidates to weighted ones
-// and runs the algorithm.
-func pickWeightedFromCandidates(candidates []schedulerCandidate, cfg weightedSelectionSettings) string {
-	if len(candidates) == 0 {
-		return ""
-	}
-	now := time.Now()
-
-	// Build weighted candidates, pulling credits and success/error from the pool.
-	ws := make([]*weightedCandidate, 0, len(candidates))
-	for _, c := range candidates {
-		wc := &weightedCandidate{
-			ID:      c.ID,
-			UID:     c.ID,
-			Label:   c.ID,
-			Credits: c.Credits,
-		}
-		// Find pool lane for success/error counters
-		for _, lane := range state.pool.snapshot() {
-			if lane.UID != c.ID && laneKey(lane.Provider, lane.UID) != c.ID {
-				continue
-			}
-			wc.SuccessCount = lane.Successes
-			wc.ErrorTotal = lane.Failures
-			wc.LastUsed = lane.LastUsed
-			break
-		}
-		ws = append(ws, wc)
-	}
-
-	picked := pickWeighted(ws, now, cfg)
-	if picked == nil {
-		return ""
-	}
-	return picked.ID
 }
 
 // pickByExpiryScheduler adapts scheduler candidates to the rotation gate chain.

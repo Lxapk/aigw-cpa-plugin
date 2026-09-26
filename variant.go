@@ -95,7 +95,7 @@ func variantForCredentials(creds *workBuddyCredentials) wbVariant {
 // variantAllowed reports whether a credential may be acted on given the current
 // override.
 //
-// This is what the 「版本切换」 selector actually controls:
+// This is what the 「供应商切换」 selector actually controls:
 //
 //	auto  (empty) -> every account, so both channels work side by side;
 //	国内版        -> only credentials that resolve to cn;

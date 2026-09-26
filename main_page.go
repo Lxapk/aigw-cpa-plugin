@@ -218,11 +218,11 @@ func renderMainPage() string {
 		// feature would actually act on.
 		cnAccounts, aiAccounts := splitAccountsByVariant(accounts)
 		b.WriteString(`<div class="muted small" style="margin:.2rem 0 .6rem">共 ` +
-			fmt.Sprint(len(accounts)) + ` 个账号：国内版 ` + fmt.Sprint(len(cnAccounts)) +
-			` 个，国际版 ` + fmt.Sprint(len(aiAccounts)) + ` 个。` +
-			`「版本切换」为自动时两组都会参与调用；切换为某一版时仅该组参与。</div>`)
-		b.WriteString(renderAccountGroup("国内版账号", "cn", cnAccounts))
-		b.WriteString(renderAccountGroup("国际版账号", "ai", aiAccounts))
+			fmt.Sprint(len(accounts)) + ` 个账号：国内供应商 ` + fmt.Sprint(len(cnAccounts)) +
+			` 个，国际供应商 ` + fmt.Sprint(len(aiAccounts)) + ` 个。` +
+			`「供应商切换」为全部供应商时两组都会参与调用；选定某一侧时仅该组参与。</div>`)
+		b.WriteString(renderAccountGroup("国内供应商账号", "cn", cnAccounts))
+		b.WriteString(renderAccountGroup("国际供应商账号", "ai", aiAccounts))
 	}
 	if warn := state.accounts.lastError(); warn != "" {
 		b.WriteString(`<div class="note bad">读取账号列表失败：` + html.EscapeString(warn) + `</div>`)
@@ -387,9 +387,9 @@ func renderMainPage() string {
 	b.WriteString(`</div>`)
 
 	curVariant := state.settings.get().VariantOverride
-	b.WriteString(`<div class="card"><h2>版本切换 <span class="hint">国内版与国际版</span></h2>`)
+	b.WriteString(`<div class="card"><h2>供应商切换 <span class="hint">国内供应商与国际供应商</span></h2>`)
 	b.WriteString(`<div class="seg" id="variantSeg">`)
-	for _, opt := range []struct{ v, label string }{{"auto", "自动"}, {"cn", "国内版"}, {"ai", "国际版"}} {
+	for _, opt := range []struct{ v, label string }{{"auto", "全部供应商"}, {"cn", "国内供应商"}, {"ai", "国际供应商"}} {
 		cls := ""
 		if (opt.v == "auto" && curVariant == "") || opt.v == curVariant {
 			cls = ` class="active"`
@@ -397,9 +397,26 @@ func renderMainPage() string {
 		b.WriteString(`<button type="button" data-variant="` + opt.v + `"` + cls + ` onclick="setVariant('` + opt.v + `')">` + opt.label + `</button>`)
 	}
 	b.WriteString(`</div>`)
-	b.WriteString(`<div class="note">作用于本插件对上游接口与域名的选择：<strong>自动</strong>按账号凭据识别（域名优先，其次 JWT 签发方），<strong>国内版</strong>/<strong>国际版</strong>则强制全部账号。</div>`)
-	b.WriteString(`<div class="note">该开关不会改写已登录账号的凭据，也不会重建账号池；若账号真实归属与所选版本不符，其签到与额度查询可能失败。国际版没有签到接口，该版本账号将自动跳过签到。</div>`)
+	b.WriteString(`<div class="note">决定本插件这一轮操作<strong>作用于哪些账号</strong>：<strong>全部供应商</strong>（默认）让国内与国际账号同轮参与；<strong>国内供应商</strong>只处理国内账号，<strong>国际供应商</strong>只处理国际账号。</div>`)
+	b.WriteString(`<div class="note">它<strong>不会</strong>把账号改判成另一个供应商：每个账号始终调用签发它凭据的那一侧接口，否则必然鉴权失败。因此选择某一侧时，另一侧账号只是被跳过，不需要重新登录。</div>`)
+	b.WriteString(`<div class="note">国际供应商没有签到接口，也没有成长任务中心；这些功能只在选用国内账号时执行。</div>`)
 	b.WriteString(`<div class="muted small" id="variantMsg"></div>`)
+
+	// Two explicit authorisation entries.
+	//
+	// CPA shows one OAuth entry per plugin and that entry already follows the
+	// selector above. These buttons exist for the mixed case: adding an account
+	// for the supplier you are not currently scoped to, without having to flip
+	// the setting back and forth.
+	b.WriteString(`<h3 style="margin:1rem 0 .35rem;font-size:.95rem">新增授权</h3>`)
+	b.WriteString(`<div class="note">CPA 的授权入口会按上面的"供应商切换"决定走哪一侧。` +
+		`下面两个按钮用于<strong>单独为某一侧新增账号</strong>，不影响当前设置。</div>`)
+	b.WriteString(`<div class="row">`)
+	b.WriteString(`<button type="button" onclick="startAuth('cn')">国内版授权</button>`)
+	b.WriteString(`<button type="button" onclick="startAuth('ai')">国际版授权</button>`)
+	b.WriteString(`</div>`)
+	b.WriteString(`<div class="muted small" id="authMsg"></div>`)
+	b.WriteString(`<div id="authLinkBox"></div>`)
 	b.WriteString(`</div>`)
 
 	b.WriteString(`</div>` + mainPageScript() + `</body></html>`)
@@ -477,6 +494,9 @@ func handleMainRequest(req pluginapi.ManagementRequest) (managementResponse, boo
 
 	case "/variant":
 		return handleVariantRequest(req)
+
+	case "/auth/start":
+		return panelAuthStart(req)
 
 	case "/account/toggle":
 		return handleAccountToggleRequest(req)
@@ -578,12 +598,12 @@ func handleVariantRequest(req pluginapi.ManagementRequest) (managementResponse, 
 	// GET reports the current override; the panel reads it on load.
 	if method == http.MethodGet {
 		current := state.settings.get().VariantOverride
-		label := "自动识别"
+		label := "全部供应商"
 		switch current {
 		case "cn":
-			label = "国内版"
+			label = "仅国内供应商"
 		case "ai":
-			label = "国际版"
+			label = "仅国际供应商"
 		}
 		return managementResponse{
 			StatusCode: http.StatusOK,
@@ -689,7 +709,7 @@ func renderAccountGroup(title, variantKey string, accounts []workBuddyAccount) s
 
 	if variantKey == "ai" {
 		b.WriteString(`<div class="muted small" style="margin-bottom:.4rem">` +
-			`调用主机 www.workbuddy.ai。国际版没有签到，也没有成长任务中心；额度查询与对外调用可用。</div>`)
+			`调用主机 www.workbuddy.ai。国际供应商没有签到，也没有成长任务中心；额度查询与对外调用可用。</div>`)
 	} else {
 		b.WriteString(`<div class="muted small" style="margin-bottom:.4rem">` +
 			`调用主机 copilot.tencent.com。签到、成长任务、猫猫旅行与额度查询均可用。</div>`)

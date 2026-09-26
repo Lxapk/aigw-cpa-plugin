@@ -49,6 +49,36 @@ func TestNormalizeStrategy(t *testing.T) {
 	}
 }
 
+// TestWeightedStrategyIsGone is the guard for the removal.
+//
+// The three-factor weighted strategy shared its entire call path with
+// by_credits — same SchedulerPick RPC, same candidate set, same response — and
+// its enable switch was never read, so it was a second name for the same
+// behaviour plus an inert setting. A configuration saved under the old version
+// must now fall back to the default rather than resolving to a strategy that no
+// longer exists.
+func TestWeightedStrategyIsGone(t *testing.T) {
+	for _, spelling := range []string{"weighted", "WEIGHTED", "Weighted", "三因子", "加权"} {
+		if got := normalizeStrategy(spelling); got != strategyByCredits {
+			t.Errorf("normalizeStrategy(%q) = %v, want the by_credits default", spelling, got)
+		}
+	}
+	for _, s := range allSchedulerStrategies {
+		if string(s) == "weighted" {
+			t.Fatal("weighted is still advertised in allSchedulerStrategies")
+		}
+	}
+	if len(allSchedulerStrategies) != 4 {
+		t.Fatalf("strategy count = %d, want 4 after removing weighted", len(allSchedulerStrategies))
+	}
+	// Labels must not mention the removed strategy.
+	for _, s := range allSchedulerStrategies {
+		if strings.Contains(s.label(), "三因子") {
+			t.Fatalf("label %q still refers to the removed strategy", s.label())
+		}
+	}
+}
+
 func TestStrategyLabels(t *testing.T) {
 	cases := map[schedulerStrategy]string{
 		strategyByCredits:  "按额度",

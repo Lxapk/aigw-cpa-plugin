@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -207,24 +208,14 @@ func authLoginStart(request []byte) ([]byte, error) {
 	//
 	// CPA exposes a single OAuth entry per plugin, so the version selector is
 	// carried in Metadata. When the operator has not chosen, the global
-	// 版本切换 setting decides; if that is left on 自动, the domestic channel is
+	// 供应商切换 setting decides; if that is left on 全部供应商, the domestic channel is
 	// used and the response says how to reach the other one.
 	variant, explicit := authVariantResolve(req)
 
-	authURL, state, errStart := startWorkBuddyLogin(variant)
+	started, errStart := beginWorkBuddyLogin(variant)
 	if errStart != nil {
 		return errorEnvelope("login_start_failed", errStart.Error(), 502), nil
 	}
-
-	now := time.Now()
-	expiresAt := now.Add(10 * time.Minute)
-	workBuddyPendingLogins.put(&pendingLogin{
-		State:     state,
-		AuthURL:   authURL,
-		StartedAt: now,
-		ExpiresAt: expiresAt,
-		Variant:   variant,
-	})
 
 	// Spell out which channel this link belongs to and how to get the other, so
 	// the single entry point is still usable for a mixed pool.
@@ -232,14 +223,14 @@ func authLoginStart(request []byte) ([]byte, error) {
 	if explicit {
 		hint += "本次按你选择的方向签发凭据，登录后该账号只会走 " + variant.label() + " 的接口。"
 	} else {
-		hint += "当前未指定版本，按「版本切换」设置选择；如需另一个版本，请先在设置里切换，或再次点击授权并指定版本。"
+		hint += "当前未指定供应商，按「供应商切换」设置选择；如需另一侧，请先在设置里切换，或再次点击授权并指定供应商。"
 	}
 
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  workBuddyProviderKey,
-		URL:       authURL,
-		State:     state,
-		ExpiresAt: expiresAt,
+		URL:       started.URL,
+		State:     started.State,
+		ExpiresAt: started.ExpiresAt,
 		Metadata: map[string]any{
 			"display_name":  workBuddyDisplayName,
 			"variant":       string(variant),
@@ -251,6 +242,100 @@ func authLoginStart(request []byte) ([]byte, error) {
 			"hint":          hint,
 		},
 	})
+}
+
+// workBuddyLoginStart is one issued login link.
+type workBuddyLoginStart struct {
+	State     string
+	URL       string
+	ExpiresAt time.Time
+	Variant   wbVariant
+}
+
+// beginWorkBuddyLogin requests a device code for a realm and remembers the
+// pending login so the poll can find it.
+//
+// Shared by the CPA-managed auth flow and the panel's own buttons, so both
+// produce links that the same poller completes.
+func beginWorkBuddyLogin(variant wbVariant) (workBuddyLoginStart, error) {
+	authURL, state, errStart := startWorkBuddyLogin(variant)
+	if errStart != nil {
+		return workBuddyLoginStart{}, errStart
+	}
+	now := time.Now()
+	expiresAt := now.Add(10 * time.Minute)
+	workBuddyPendingLogins.put(&pendingLogin{
+		State:     state,
+		AuthURL:   authURL,
+		StartedAt: now,
+		ExpiresAt: expiresAt,
+		Variant:   variant,
+	})
+	return workBuddyLoginStart{
+		State:     state,
+		URL:       authURL,
+		ExpiresAt: expiresAt,
+		Variant:   variant,
+	}, nil
+}
+
+// panelAuthStart answers GET /workbuddy/auth/start?variant=cn|ai.
+//
+// CPA exposes exactly one OAuth entry per plugin (AuthProvider.Identifier
+// returns a single string), and that entry already follows the 供应商切换
+// setting: authVariantResolve() maps 国内版/国际版 to the matching login host.
+//
+// This endpoint covers the remaining case — adding an account for the *other*
+// supplier without changing the global setting. It returns that realm's login
+// link, and the state is registered so the normal poll completes it.
+func panelAuthStart(req pluginapi.ManagementRequest) (managementResponse, bool) {
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	if method != http.MethodGet && method != http.MethodPost {
+		return managementResponse{StatusCode: http.StatusMethodNotAllowed}, true
+	}
+
+	wanted := strings.TrimSpace(req.Query.Get("variant"))
+	variant, ok := parseVariant(wanted)
+	if !ok {
+		// Without an explicit realm the call would be indistinguishable from the
+		// OAuth entry itself, which already honours the setting.
+		return managementResponse{
+			StatusCode: http.StatusBadRequest,
+			Headers:    jsonResponseHeaders(),
+			Body: mustJSON(map[string]any{
+				"ok":    false,
+				"error": "请指定 variant=cn 或 variant=ai",
+			}),
+		}, true
+	}
+
+	started, errStart := beginWorkBuddyLogin(variant)
+	if errStart != nil {
+		return managementResponse{
+			StatusCode: http.StatusBadGateway,
+			Headers:    jsonResponseHeaders(),
+			Body: mustJSON(map[string]any{
+				"ok":    false,
+				"error": errStart.Error(),
+			}),
+		}, true
+	}
+
+	return managementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    jsonResponseHeaders(),
+		Body: mustJSON(map[string]any{
+			"ok":            true,
+			"variant":       string(variant),
+			"variant_label": variant.label(),
+			"auth_host":     authHostFor(variant),
+			"url":           started.URL,
+			"state":         started.State,
+			"expires_at":    started.ExpiresAt,
+			"hint": "在浏览器打开该链接，使用" + variant.label() + "账号登录。" +
+				"登录完成后回到 CPA 的授权页，或在本面板点击「刷新账号」查看结果。",
+		}),
+	}, true
 }
 
 // authVariantHint reads the realm hint from a login-start request.

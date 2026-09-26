@@ -136,7 +136,22 @@ func managementRegistration() managementRegistrationResponse {
 			{
 				Method:      http.MethodGet,
 				Path:        "/workbuddy/variant",
-				Description: "Read the current variant override.",
+				Description: "Read the current supplier scope (全部/国内/国际供应商).",
+			},
+			// Supplier-scoped authorisation links.
+			//
+			// CPA's own OAuth entry already follows the 供应商切换 setting, so
+			// these cover the remaining case: adding an account for the other
+			// supplier without changing that setting.
+			{
+				Method:      http.MethodGet,
+				Path:        "/workbuddy/auth/start",
+				Description: "Get a supplier-scoped login link (?variant=cn|ai).",
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        "/workbuddy/auth/start",
+				Description: "Get a supplier-scoped login link (?variant=cn|ai).",
 			},
 			// Growth-task endpoints.
 			//
